@@ -762,14 +762,14 @@ function showTab(tab){
    AI
 ═══════════════════════════════════════ */
 async function callAI(prompt,sys){
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
+  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
   if(!res.ok)throw new Error('AI error '+res.status);
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI error');return d.text;
 }
 async function callAIpdf(b64,prompt){
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
+  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
   if(!res.ok)throw new Error('AI PDF error');
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI error');return d.text;
 }
 function pJSON(t){return JSON.parse(t.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,''))}
 
@@ -1817,13 +1817,14 @@ Keep responses focused and educational. Celebrate progress and be patient.`;
     // Build message history for context
     const history=conv.msgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
 
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    const res=await fetch('/api/ai/chat',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,system:userCtx,messages:history})});
+      body:JSON.stringify({system:userCtx,messages:history,max_tokens:2500})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.content[0].text;
+    if(!data.ok)throw new Error(data.error||'AI request failed');
+    const reply=data.text;
 
     conv.msgs.push({role:'assistant',content:reply,ts:now()});
   }catch(err){
@@ -2044,13 +2045,14 @@ When generating a study plan, structure it as:
     const history=plannerMsgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
     if(suppressUserMsg)history.push({role:'user',content});
 
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    const res=await fetch('/api/ai/chat',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2800,system:sysPrompt,messages:history})});
+      body:JSON.stringify({system:sysPrompt,messages:history,max_tokens:2800})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.content[0].text;
+    if(!data.ok)throw new Error(data.error||'AI request failed');
+    const reply=data.text;
 
     if(!suppressUserMsg){}else plannerMsgs.push({role:'user',content:isAnalysis?'[AI analysed my study profile]':content,ts:now()});
     plannerMsgs.push({role:'assistant',content:reply,ts:now()});
