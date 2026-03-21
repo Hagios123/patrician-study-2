@@ -569,13 +569,28 @@ app.get('/api/schedules', auth, async (req, res) => {
 app.post('/api/schedules', auth, async (req, res) => {
   try {
     const { id, name, subjects, startDate, startTime, breakMin, generated } = req.body;
-    const sid = id || uid();
+    const sid        = id || uid();
+    const safeName   = name || 'My Schedule';
+    const safeSubs   = JSON.stringify(subjects   || []);
+    const safeGen    = JSON.stringify(generated  || []);
+    const safeDate   = startDate  || '';
+    const safeTime   = startTime  || '09:00';
+    const safeBreak  = breakMin   || 10;
+    const ts         = now();
     await db.execute(
-      'INSERT INTO schedules (id,user_id,name,subjects,start_date,start_time,break_min,generated,created_at) VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=?,subjects=?,generated=?,start_date=?,start_time=?,break_min=?',
-      [sid, req.session.userId, name, JSON.stringify(subjects), startDate, startTime, breakMin || 10, JSON.stringify(generated), now(), name, JSON.stringify(subjects), JSON.stringify(generated), startDate, startTime, breakMin || 10]
+      `INSERT INTO schedules
+         (id, user_id, name, subjects, start_date, start_time, break_min, generated, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         name=?, subjects=?, generated=?, start_date=?, start_time=?, break_min=?`,
+      [sid, req.session.userId, safeName, safeSubs, safeDate, safeTime, safeBreak, safeGen, ts,
+       safeName, safeSubs, safeGen, safeDate, safeTime, safeBreak]
     );
     res.json({ ok: true, id: sid });
-  } catch (e) { res.json({ ok: false, error: e.message }); }
+  } catch (e) {
+    console.error('Schedule save error:', e.message);
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 app.delete('/api/schedules/:id', auth, async (req, res) => {
