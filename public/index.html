@@ -767,12 +767,12 @@ function showTab(tab){
 async function callAI(prompt,sys){
   const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
   if(!res.ok)throw new Error('AI error '+res.status);
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();return d.text;
 }
 async function callAIpdf(b64,prompt){
   const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
   if(!res.ok)throw new Error('AI PDF error');
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();return d.text;
 }
 function pJSON(t){return JSON.parse(t.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,''))}
 
@@ -2109,4 +2109,5 @@ showScr('sl');
 </script>
 </body>
 </html>
+
 
