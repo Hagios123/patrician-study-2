@@ -1826,7 +1826,7 @@ Keep responses focused and educational. Celebrate progress and be patient.`;
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.content[0].text;
+    const reply=data.text;
 
     conv.msgs.push({role:'assistant',content:reply,ts:now()});
   }catch(err){
@@ -2053,7 +2053,7 @@ When generating a study plan, structure it as:
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.content[0].text;
+    const reply=data.text;
 
     if(!suppressUserMsg){}else plannerMsgs.push({role:'user',content:isAnalysis?'[AI analysed my study profile]':content,ts:now()});
     plannerMsgs.push({role:'assistant',content:reply,ts:now()});
@@ -2109,5 +2109,6 @@ showScr('sl');
 </script>
 </body>
 </html>
+
 
 
