@@ -168,19 +168,26 @@ app.post('/api/login', async (req, res) => {
 /** POST /api/register — Create account */
 app.post('/api/register', async (req, res) => {
   try {
-    const { name, email, password, role, year, studyingAs } = req.body;
+    const { name, email, password, role, year, studyingAs, rollNo } = req.body;
     if (!name || !email || !password || !role) return res.json({ ok: false, error: 'Fill all fields' });
     if (password.length < 6) return res.json({ ok: false, error: 'Password too short (min 6)' });
+
+    // Roll number uniqueness check for students
+    if (role === 'student' && rollNo) {
+      const [existingRoll] = await db.execute('SELECT id FROM users WHERE roll_no = ?', [rollNo.toUpperCase()]);
+      if (existingRoll.length > 0) return res.json({ ok: false, error: 'Roll number already registered' });
+    }
 
     const [existing] = await db.execute('SELECT id FROM users WHERE email = ?', [email.toLowerCase()]);
     if (existing.length > 0) return res.json({ ok: false, error: 'Email already registered' });
 
     const hashedPw = await bcrypt.hash(password, 10);
     const newId    = uid();
+    const safeRoll = rollNo ? rollNo.toUpperCase() : null;
 
     await db.execute(
-      'INSERT INTO users (id,name,email,password,role,year,studying_as,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
-      [newId, name, email.toLowerCase(), hashedPw, role, year || null, studyingAs || null, 'pending', now()]
+      'INSERT INTO users (id,name,email,password,role,year,studying_as,roll_no,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [newId, name, email.toLowerCase(), hashedPw, role, year || null, studyingAs || null, safeRoll, 'pending', now()]
     );
 
     await db.execute(
@@ -188,9 +195,43 @@ app.post('/api/register', async (req, res) => {
       [uid(), newId, role, now()]
     );
 
+    // If parent: auto-link to child by roll number
+    if (role === 'parent' && rollNo) {
+      const [childRows] = await db.execute('SELECT id FROM users WHERE roll_no = ? AND role = "student"', [rollNo.toUpperCase()]);
+      if (childRows[0]) {
+        await db.execute(
+          'INSERT IGNORE INTO parent_links (id,parent_id,student_id,linked_at) VALUES (?,?,?,?)',
+          [uid(), newId, childRows[0].id, now()]
+        );
+      }
+    }
+
+    // If student: auto-assign to a teacher with matching department
+    if (role === 'student' && studyingAs) {
+      const [teachers] = await db.execute(
+        'SELECT id FROM users WHERE role = "teacher" AND studying_as = ? AND status = "approved" LIMIT 1',
+        [studyingAs]
+      );
+      if (teachers[0]) {
+        // Create a classroom link by adding student to teacher's first classroom in their dept
+        const [classrooms] = await db.execute(
+          'SELECT id FROM classrooms WHERE teacher_id = ? LIMIT 1',
+          [teachers[0].id]
+        );
+        if (classrooms[0]) {
+          await db.execute(
+            'INSERT IGNORE INTO classroom_students (classroom_id,student_id) VALUES (?,?)',
+            [classrooms[0].id, newId]
+          ).catch(() => {});
+        }
+        // Notify the teacher
+        await pushNotif(teachers[0].id, `New ${studyingAs} student assigned: ${name} (${safeRoll||email})`, '🎓', 'info');
+      }
+    }
+
     // Notify admin
     const [admin] = await db.execute('SELECT id FROM users WHERE role = "admin" LIMIT 1');
-    if (admin[0]) await pushNotif(admin[0].id, `New ${role} registration: ${name}`, '👤', 'info');
+    if (admin[0]) await pushNotif(admin[0].id, `New ${role} registration: ${name}${safeRoll?' ('+safeRoll+')':''}`, '👤', 'info');
 
     res.json({ ok: true, message: 'Account created! Awaiting approval.' });
   } catch (e) {
@@ -198,6 +239,27 @@ app.post('/api/register', async (req, res) => {
     res.json({ ok: false, error: 'Server error' });
   }
 });
+
+// GET /api/department-students — teacher sees all students in their department
+app.get('/api/department-students', auth, async (req, res) => {
+  try {
+    const [teacher] = await db.execute('SELECT studying_as FROM users WHERE id = ?', [req.session.userId]);
+    if (!teacher[0]?.studying_as) return res.json({ ok: true, students: [] });
+    const dept = teacher[0].studying_as;
+    const [students] = await db.execute(
+      `SELECT u.id, u.name, u.email, u.year, u.studying_as, u.roll_no, u.status, u.created_at,
+              COUNT(g.id) as quiz_count,
+              ROUND(AVG(g.score),1) as avg_score
+       FROM users u
+       LEFT JOIN grades g ON g.student_id = u.id AND g.type = 'quiz'
+       WHERE u.role = 'student' AND u.studying_as = ? AND u.status = 'approved'
+       GROUP BY u.id ORDER BY u.name`,
+      [dept]
+    );
+    res.json({ ok: true, students, department: dept });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
 
 /** POST /api/logout */
 app.post('/api/logout', (req, res) => {
@@ -840,6 +902,20 @@ app.post('/api/events', auth, async (req, res) => {
       'INSERT INTO events (id,title,date,type,user_id,created_at) VALUES (?,?,?,?,?,?)',
       [uid(), title, date, type || 'event', req.session.userId, now()]
     );
+    res.json({ ok: true });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+app.delete('/api/events/:id', auth, async (req, res) => {
+  try {
+    await db.execute('DELETE FROM events WHERE id = ? AND user_id = ?', [req.params.id, req.session.userId]);
+    res.json({ ok: true });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+app.delete('/api/events', auth, async (req, res) => {
+  try {
+    await db.execute('DELETE FROM events WHERE user_id = ?', [req.session.userId]);
     res.json({ ok: true });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
