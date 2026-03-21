@@ -649,12 +649,16 @@ function logAct(action,detail=''){
   DB.sal(log.slice(0,500));
 }
 function pushNotif(uid2,text,icon='🔔',type='info'){
-  const n=DB.notifs();n.unshift({id:uid(),userId:uid2,text,icon,type,read:false,ts:now()});
-  DB.sn2(n);if(CU&&CU.id===uid2)updNDot();
+  // Server handles real notifications — this is a client-side no-op
 }
-function updNDot(){
-  const cnt=DB.notifs().filter(n=>n.userId===CU?.id&&!n.read).length;
-  const d=document.getElementById('nd');if(d)d.style.display=cnt>0?'block':'none';
+async function updNDot(){
+  try{
+    const [nRes,apRes]=await Promise.all([fetch('/api/notifications').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/approvals').then(x=>x.json()).catch(()=>({ok:false}))]);
+    window._notifCount=nRes.ok?nRes.notifications.filter(n=>!n.is_read).length:0;
+    window._pendingCount=apRes.ok?apRes.approvals.length:0;
+    const d=document.getElementById('nd');if(d)d.style.display=window._notifCount>0?'block':'none';
+    buildNav();
+  }catch(e){}
 }
 function hashStr(s){let h=0;for(let i=0;i<s.length;i++)h=(h<<5)-h+s.charCodeAt(i);return Math.abs(h)%12}
 
@@ -738,8 +742,8 @@ function buildNav(){
   const tabs=NAV[r]||NAV.student;
   document.getElementById('snv').innerHTML=tabs.map(t=>{
     let bdg='';
-    if(t.bd&&t.id==='approvals'){const cnt=DB.pending().filter(p=>r==='admin'||p.role==='student').length;if(cnt>0)bdg=`<span class="nb"><span class="bc">${cnt}</span></span>`;}
-    if(t.bd&&t.id==='notifications'){const cnt=DB.notifs().filter(n=>n.userId===CU.id&&!n.read).length;if(cnt>0)bdg=`<span class="nb"><span class="bc">${cnt}</span></span>`;}
+    if(t.bd&&t.id==='approvals'){const cnt=window._pendingCount||0;if(cnt>0)bdg=`<span class="nb"><span class="bc">${cnt}</span></span>`;}
+    if(t.bd&&t.id==='notifications'){const cnt=window._notifCount||0;if(cnt>0)bdg=`<span class="nb"><span class="bc">${cnt}</span></span>`;}
     return `<div class="ni" data-tab="${t.id}" onclick="showTab('${t.id}')"><span class="nx">${t.ic}</span><span class="nt">${esc(t.lb)}</span>${bdg}</div>`;
   }).join('');
 }
@@ -765,50 +769,66 @@ function showTab(tab){
    AI
 ═══════════════════════════════════════ */
 async function callAI(prompt,sys){
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
+  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}],max_tokens:3500})});
   if(!res.ok)throw new Error('AI error '+res.status);
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI failed');return d.text;
 }
 async function callAIpdf(b64,prompt){
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
+  // PDF content extraction — send text description since Groq doesn't support PDF directly
+  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:'Extract exam schedules from timetable data. Return only valid JSON.',messages:[{role:'user',content:prompt+' (PDF data provided as base64 — extract any visible subject/date information)'}],max_tokens:3500})});
   if(!res.ok)throw new Error('AI PDF error');
-  const d=await res.json();return d.content[0].text;
+  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI failed');return d.text;
 }
 function pJSON(t){return JSON.parse(t.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,''))}
 
 /* ═══════════════════════════════════════
    DASHBOARD
 ═══════════════════════════════════════ */
-function rDash(){
+async function rDash(){
   const p=document.getElementById('panel-dashboard');
   const r=CU.role,td=today();
-  const ann=DB.announcements().filter(a=>!a.targetRole||a.targetRole==='all'||a.targetRole===CU.role).slice(0,2);
-  const annHtml=ann.length?ann.map(a=>`<div class="anc"><div class="ant">${esc(a.title)}</div><div class="anb">${esc(a.body.slice(0,100))}${a.body.length>100?'…':''}</div></div>`).join(''):'<p style="color:var(--txm);font-size:.82rem">No announcements</p>';
-  if(r==='student'){
-    const myS=DB.schedules().filter(s=>s.userId===CU.id);
-    const ses=myS.flatMap(s=>(s.gen||[]).find(d=>d.date===td)?.sessions||[]);
-    const myA=DB.assignments().filter(a=>{if(a.assignedTo?.includes(CU.id))return true;if(a.assignedYear===CU.year)return true;const g=DB.groups().find(x=>x.id===a.assignedGroup);return g&&g.members?.includes(CU.id)}).filter(a=>!(a.submissions||[]).find(s=>s.studentId===CU.id));
-    const myG=DB.grades().filter(g=>g.studentId===CU.id);
-    const avg=myG.length?Math.round(myG.reduce((a,g)=>a+(g.score||0),0)/myG.length):null;
-    p.innerHTML=`<div class="ph"><div class="ptt">Welcome back, ${esc(CU.name.split(' ')[0])} 👋</div><div class="ps">Your learning overview for today</div></div>
-      <div class="sr"><div class="sb2"><div class="sn" style="color:var(--gold)">${ses.length}</div><div class="sl2">Sessions Today</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${myA.length}</div><div class="sl2">Due Assignments</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${myG.length}</div><div class="sl2">Graded</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${avg!==null?avg+'%':'—'}</div><div class="sl2">Avg Grade</div></div></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
-        <div class="card"><div class="ch"><div class="ct">📅 Today's Sessions</div><button class="btn bgh bsm" onclick="showTab('schedule')">All</button></div>${ses.length?ses.slice(0,4).map(s=>`<div class="sr2" style="padding:7px 0"><span class="stm">${s.startTime}</span><span class="sd" style="background:hsl(${hashStr(s.subject)*30},62%,54%)"></span><div class="si" style="margin-left:7px"><div class="ss">${esc(s.subject)}</div><div class="sto">${esc(s.topic)}</div></div><span class="sdur">${s.durationMinutes}m</span></div>`).join(''):`<p style="color:var(--txm);font-size:.82rem">No sessions today. <span style="color:var(--gold);cursor:pointer" onclick="showTab('schedule')">Create schedule →</span></p>`}</div>
-        <div class="card"><div class="ch"><div class="ct">📢 Announcements</div></div>${annHtml}</div>
-      </div>
-      <div class="card"><div class="ch"><div class="ct">⏱️ Pomodoro Study Timer</div><span class="bdg bg">Focus Tool</span></div>${buildPomo()}</div>`;
-    setTimeout(bindPomo,80);
-  } else if(r==='teacher'){
-    const myC=DB.classrooms().filter(c=>c.teacherId===CU.id);
-    const myA=DB.assignments().filter(a=>a.teacherId===CU.id);
-    const ung=myA.reduce((acc,a)=>acc+(a.submissions||[]).filter(s=>!s.grade).length,0);
-    p.innerHTML=`<div class="ph"><div class="ptt">Teacher Dashboard 📚</div><div class="ps">${esc(CU.name)}</div></div>
-      <div class="sr"><div class="sb2"><div class="sn" style="color:var(--gold)">${myC.length}</div><div class="sl2">Classrooms</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${myA.length}</div><div class="sl2">Assignments</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${ung}</div><div class="sl2">Ungraded</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${DB.pending().filter(p=>p.role==='student').length}</div><div class="sl2">Pending Approvals</div></div></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        <div class="card"><div class="ch"><div class="ct">🏫 My Classrooms</div><button class="btn bp bsm" onclick="showTab('classrooms')">Manage</button></div>${myC.slice(0,4).map(c=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--bdr)"><div style="width:32px;height:32px;border-radius:8px;background:var(--gold-d);color:var(--gold);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.88rem">${esc(c.name[0])}</div><div><div style="font-weight:600;font-size:.84rem">${esc(c.name)}</div><div style="font-size:.73rem;color:var(--txm)">${(c.students||[]).length} students</div></div></div>`).join('')||'<p style="color:var(--txm);font-size:.82rem">No classrooms yet.</p>'}</div>
-        <div class="card"><div class="ch"><div class="ct">📢 Announcements</div><button class="btn bp bsm" onclick="showCreateAnn()">Post</button></div>${annHtml}</div>
-      </div>`;
-  }
+  p.innerHTML=`<div class="ph"><div class="ptt">Loading…</div></div>`;
+  try{
+    const [annRes,asgRes,grRes,schRes,classRes,apRes,grpRes]=await Promise.all([
+      fetch('/api/announcements').then(x=>x.json()),
+      fetch('/api/assignments').then(x=>x.json()),
+      fetch('/api/grades').then(x=>x.json()),
+      fetch('/api/schedules').then(x=>x.json()),
+      fetch('/api/classrooms').then(x=>x.json()),
+      fetch('/api/approvals').then(x=>x.json()),
+      fetch('/api/groups').then(x=>x.json()),
+    ]);
+    const anns=(annRes.ok?annRes.announcements:[]).filter(a=>!a.target_role||a.target_role==='all'||a.target_role===CU.role).slice(0,2);
+    const annHtml=anns.length?anns.map(a=>`<div class="anc"><div class="ant">${esc(a.title)}</div><div class="anb">${esc((a.body||'').slice(0,100))}${(a.body||'').length>100?'…':''}</div></div>`).join(''):'<p style="color:var(--txm);font-size:.82rem">No announcements</p>';
+    const allGroups=grpRes.ok?grpRes.groups:[];
+    if(r==='student'){
+      const scheds=schRes.ok?schRes.schedules:[];
+      const ses=scheds.flatMap(s=>(s.generated||s.gen||[]).find?.(d=>d.date===td)?.sessions||[]);
+      const allA=asgRes.ok?asgRes.assignments:[];
+      const myA=allA.filter(a=>{if((a.assigned_to||a.assignedTo||[]).includes(CU.id))return true;if((a.assigned_year||a.assignedYear)===CU.year)return true;const g=allGroups.find(x=>x.id===(a.assigned_group||a.assignedGroup));return g&&(g.members||[]).includes(CU.id);}).filter(a=>!(a.submissions||[]).find(s=>s.student_id===CU.id||s.studentId===CU.id));
+      const myG=grRes.ok?grRes.grades:[];
+      const avg=myG.length?Math.round(myG.reduce((a,g)=>a+(g.score||0),0)/myG.length):null;
+      p.innerHTML=`<div class="ph"><div class="ptt">Welcome back, ${esc(CU.name.split(' ')[0])} 👋</div><div class="ps">Your learning overview for today</div></div>
+        <div class="sr"><div class="sb2"><div class="sn" style="color:var(--gold)">${ses.length}</div><div class="sl2">Sessions Today</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${myA.length}</div><div class="sl2">Due Assignments</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${myG.length}</div><div class="sl2">Graded</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${avg!==null?avg+'%':'—'}</div><div class="sl2">Avg Grade</div></div></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+          <div class="card"><div class="ch"><div class="ct">📅 Today's Sessions</div><button class="btn bgh bsm" onclick="showTab('schedule')">All</button></div>${ses.length?ses.slice(0,4).map(s=>`<div class="sr2" style="padding:7px 0"><span class="stm">${s.startTime}</span><span class="sd" style="background:hsl(${hashStr(s.subject)*30},62%,54%)"></span><div class="si" style="margin-left:7px"><div class="ss">${esc(s.subject)}</div><div class="sto">${esc(s.topic)}</div></div><span class="sdur">${s.durationMinutes}m</span></div>`).join(''):`<p style="color:var(--txm);font-size:.82rem">No sessions today. <span style="color:var(--gold);cursor:pointer" onclick="showTab('schedule')">Create schedule →</span></p>`}</div>
+          <div class="card"><div class="ch"><div class="ct">📢 Announcements</div></div>${annHtml}</div>
+        </div>
+        <div class="card"><div class="ch"><div class="ct">⏱️ Pomodoro Study Timer</div><span class="bdg bg">Focus Tool</span></div>${buildPomo()}</div>`;
+      setTimeout(bindPomo,80);
+    } else if(r==='teacher'){
+      const myC=(classRes.ok?classRes.classrooms:[]).filter(c=>c.teacher_id===CU.id||c.teacherId===CU.id);
+      const myA=(asgRes.ok?asgRes.assignments:[]).filter(a=>a.teacher_id===CU.id||a.teacherId===CU.id);
+      const ung=myA.reduce((acc,a)=>acc+(a.submissions||[]).filter(s=>!s.grade_letter&&!s.grade).length,0);
+      const pendCount=(apRes.ok?apRes.approvals:[]).filter(pa=>pa.role==='student').length;
+      p.innerHTML=`<div class="ph"><div class="ptt">Teacher Dashboard 📚</div><div class="ps">${esc(CU.name)}</div></div>
+        <div class="sr"><div class="sb2"><div class="sn" style="color:var(--gold)">${myC.length}</div><div class="sl2">Classrooms</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${myA.length}</div><div class="sl2">Assignments</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${ung}</div><div class="sl2">Ungraded</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${pendCount}</div><div class="sl2">Pending Approvals</div></div></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div class="card"><div class="ch"><div class="ct">🏫 My Classrooms</div><button class="btn bp bsm" onclick="showTab('classrooms')">Manage</button></div>${myC.slice(0,4).map(c=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--bdr)"><div style="width:32px;height:32px;border-radius:8px;background:var(--gold-d);color:var(--gold);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.88rem">${esc(c.name[0])}</div><div><div style="font-weight:600;font-size:.84rem">${esc(c.name)}</div><div style="font-size:.73rem;color:var(--txm)">${(c.students||[]).length} students</div></div></div>`).join('')||'<p style="color:var(--txm);font-size:.82rem">No classrooms yet.</p>'}</div>
+          <div class="card"><div class="ch"><div class="ct">📢 Announcements</div><button class="btn bp bsm" onclick="showCreateAnn()">Post</button></div>${annHtml}</div>
+        </div>`;
+    }
+  }catch(e){p.innerHTML=`<div class="ph"><div class="ptt">Dashboard</div></div><p style="color:var(--red)">Failed to load: ${e.message}</p>`;}
 }
 
 /* ── POMODORO ── */
@@ -838,9 +858,11 @@ function swPomo(){clearInterval(PTimer);PRun=false;PMode=PMode==='work'?'break':
 /* ═══════════════════════════════════════
    STUDY SCHEDULE
 ═══════════════════════════════════════ */
-function rSched(){
+async function rSched(){
   const p=document.getElementById('panel-schedule');
-  const scheds=CU.role==='admin'?DB.schedules():DB.schedules().filter(s=>s.userId===CU.id);
+  p.innerHTML=`<div class="ph"><div class="ptt">Study Schedule</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const r=await fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false}));
+  const scheds=r.ok?(CU.role==='admin'?r.schedules:r.schedules.filter(s=>s.user_id===CU.id||s.userId===CU.id)):[];
   p.innerHTML=`<div class="ph"><div class="ptt">Study Schedule</div><div class="ps">AI-powered personalised study planner</div></div>
     <div style="display:flex;gap:7px;margin-bottom:18px;flex-wrap:wrap"><button class="btn bp" onclick="startSchedWiz()">+ New Schedule</button><button class="btn bs" onclick="upPDF()">📄 Import PDF</button></div>
     ${scheds.length===0?`<div class="es"><div class="ei">📅</div><p>No schedules yet</p><button class="btn bp" onclick="startSchedWiz()">Create First Schedule</button></div>`:scheds.map(s=>`<div class="card" style="margin-bottom:9px"><div class="ch"><div class="ct">📅 ${esc(s.name)} <span class="bdg bg">${s.subjects.length} subjects</span></div><div style="display:flex;gap:6px"><button class="btn bs bsm" onclick="viewSched('${s.id}')">View</button><button class="btn bgh bsm" onclick="editSched('${s.id}')">Edit</button><button class="btn br bsm" onclick="delSched('${s.id}')">🗑</button></div></div><div style="font-size:.77rem;color:var(--txm);display:flex;gap:13px"><span>📚 ${s.subjects.map(x=>x.name).join(', ')}</span><span>📆 ${fmtDate(s.createdAt)}</span></div></div>`).join('')}`;
@@ -912,22 +934,24 @@ function manGenSched(){
   SDraft.gen=Object.keys(dm).sort().map(date=>({date,sessions:dm[date]}));
   saveSched();
 }
-function saveSched(){
-  const arr=DB.schedules();const i=arr.findIndex(s=>s.id===SDraft.id);
-  if(i>=0)arr[i]=SDraft;else arr.push(SDraft);DB.ss(arr);
-  SDraft.subjects.forEach(s=>{if(s.examDate){const ev=DB.events();ev.push({id:uid(),title:`Exam: ${s.name}`,date:s.examDate,type:'exam',userId:CU.id});DB.se(ev);}});
+async function saveSched(){
+  const res=await fetch('/api/schedules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SDraft.id,name:SDraft.name,subjects:SDraft.subjects,startDate:SDraft.startDate,startTime:SDraft.startTime,breakMin:SDraft.breakMin,generated:SDraft.gen})}).then(x=>x.json()).catch(()=>({ok:false}));
+  if(!res.ok){toast('Failed to save schedule','error');return;}
+  for(const s of SDraft.subjects){if(s.examDate){await fetch('/api/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:`Exam: ${s.name}`,date:s.examDate,type:'exam'})}).catch(()=>{});}}
   closeM(2);rSched();toast('Schedule saved!','success');logAct('SCHEDULE',SDraft.name);
 }
-function delSched(id){if(!confirm('Delete?'))return;DB.ss(DB.schedules().filter(s=>s.id!==id));rSched();toast('Deleted','info');}
+async function delSched(id){if(!confirm('Delete?'))return;await fetch(`/api/schedules/${id}`,{method:'DELETE'});rSched();toast('Deleted','info');}
 function viewSched(id){
-  const s=DB.schedules().find(x=>x.id===id);if(!s)return;const td=today();
-  const html=(s.gen||[]).map(day=>{
-    const isT=day.date===td;
-    return `<div class="cd ${isT?'cdt':''}"><div class="cdh">${isT?'📍 ':''}${fmtDate(day.date)}${isT?' <span class="bdg bg" style="margin-left:6px">Today</span>':''}<span style="margin-left:auto;font-size:.72rem;color:var(--txm)">${day.sessions.length} sessions</span></div>${day.sessions.map(se=>`<div class="sr2"><span class="stm">${se.startTime}</span><span class="sd" style="background:hsl(${hashStr(se.subject)*30},62%,54%)"></span><div class="si"><div class="ss">${esc(se.subject)}</div><div class="sto">${esc(se.topic)}</div></div><span class="sdur">${se.durationMinutes}m</span></div>`).join('')}</div>`;
-  }).join('');
-  openM(`<div class="mh"><div class="mt">📅 ${esc(s.name)}</div><button class="mx" onclick="closeM(2)">✕</button></div><div class="cw">${html||'<p style="color:var(--txm)">No sessions</p>'}</div>`,2);
+  fetch('/api/schedules').then(x=>x.json()).then(r=>{
+    const s=(r.schedules||[]).find(x=>x.id===id);if(!s)return;const td=today();
+    const gen=s.generated||s.gen||[];
+    const html=gen.map(day=>{const isT=day.date===td;return `<div class="cd ${isT?'cdt':''}"><div class="cdh">${isT?'📍 ':''}${fmtDate(day.date)}${isT?' <span class="bdg bg" style="margin-left:6px">Today</span>':''}<span style="margin-left:auto;font-size:.72rem;color:var(--txm)">${day.sessions.length} sessions</span></div>${day.sessions.map(se=>`<div class="sr2"><span class="stm">${se.startTime}</span><span class="sd" style="background:hsl(${hashStr(se.subject)*30},62%,54%)"></span><div class="si"><div class="ss">${esc(se.subject)}</div><div class="sto">${esc(se.topic)}</div></div><span class="sdur">${se.durationMinutes}m</span></div>`).join('')}</div>`;}).join('');
+    openM(`<div class="mh"><div class="mt">📅 ${esc(s.name)}</div><button class="mx" onclick="closeM(2)">✕</button></div><div class="cw">${html||'<p style="color:var(--txm)">No sessions</p>'}</div>`,2);
+  });
 }
-function editSched(id){const s=DB.schedules().find(x=>x.id===id);if(!s)return;SDraft={...s,gen:s.gen};SStep=1;openSchedMo();}
+function editSched(id){
+  fetch('/api/schedules').then(x=>x.json()).then(r=>{const s=(r.schedules||[]).find(x=>x.id===id);if(!s)return;SDraft={...s,subjects:s.subjects||[],gen:s.generated||s.gen};SStep=1;openSchedMo();});
+}
 function upPDF(){
   openM(`<div class="mh"><div class="mt">📄 Import Exam Timetable</div><button class="mx" onclick="closeM()">✕</button></div>
     <div class="ib"><span>🤖</span><span>AI reads your timetable PDF and extracts subjects, topics and dates automatically.</span></div>
@@ -953,20 +977,21 @@ async function proPDF(){
 /* ═══════════════════════════════════════
    LEARNER
 ═══════════════════════════════════════ */
-function rLearner(){
+async function rLearner(){
   const p=document.getElementById('panel-learner');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const asgn=DB.quizzes().filter(q=>!isTA&&q.assignedTo?.includes(CU.id));
-  const myScores=DB.grades().filter(g=>g.studentId===CU.id&&g.type==='quiz');
+  p.innerHTML=`<div class="ph"><div class="ptt">Learner</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [qzRes,grRes]=await Promise.all([fetch('/api/quizzes').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const asgn=qzRes.ok?qzRes.quizzes.filter(q=>!isTA&&(q.assigned_to||q.assignedTo||[]).includes(CU.id)):[];
+  const myScores=grRes.ok?grRes.grades.filter(g=>(g.student_id===CU.id||g.studentId===CU.id)&&g.type==='quiz'):[];
   p.innerHTML=`<div class="ph"><div class="ptt">Learner</div><div class="ps">Quizzes, Flashcards &amp; Learning Tools</div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:18px">
       <div class="card itv" onclick="showQCfg()"><div style="font-size:1.9rem;margin-bottom:7px">🧩</div><div style="font-weight:700;margin-bottom:3px">Quiz Mode</div><div style="font-size:.79rem;color:var(--txm)">AI-generated MCQs up to 100 questions, custom difficulty.</div></div>
       <div class="card itv" onclick="showFCCfg()"><div style="font-size:1.9rem;margin-bottom:7px">🃏</div><div style="font-weight:700;margin-bottom:3px">Flashcard Mode</div><div style="font-size:.79rem;color:var(--txm)">Flip-card review for memorisation and recall.</div></div>
     </div>
     ${isTA?`<div class="card" style="margin-bottom:14px"><div class="ch"><div class="ct">📤 Create &amp; Assign Quiz</div></div><button class="btn bp bsm" onclick="showAssignQ()">Create &amp; Assign</button></div>`:''}
-    ${asgn.length?`<div class="card" style="margin-bottom:14px"><div class="ch"><div class="ct">📚 Assigned Quizzes</div><span class="bdg bb2">${asgn.length}</span></div>${asgn.map(q=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--bdr)"><div><div style="font-weight:600;font-size:.84rem">${esc(q.subject)}</div><div style="font-size:.73rem;color:var(--txm)">${q.questions.length} questions · ${q.difficulty}</div></div><button class="btn bp bsm" onclick='startQuiz(${JSON.stringify({subject:q.subject,topic:q.topic,questions:q.questions})})'>Start</button></div>`).join('')}</div>`:''}
-    ${myScores.length?`<div class="card"><div class="ch"><div class="ct">📈 Recent Scores</div></div>${myScores.slice(0,6).map(g=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--bdr);font-size:.82rem"><span>${esc(g.subject)}</span><span class="bdg ${g.score>=80?'bgr':g.score>=60?'bg':'bd'}">${g.score}%</span></div>`).join('')}</div>`:''}`
-  ;
+    ${asgn.length?`<div class="card" style="margin-bottom:14px"><div class="ch"><div class="ct">📚 Assigned Quizzes</div><span class="bdg bb2">${asgn.length}</span></div>${asgn.map(q=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--bdr)"><div><div style="font-weight:600;font-size:.84rem">${esc(q.subject)}</div><div style="font-size:.73rem;color:var(--txm)">${(q.questions||[]).length} questions · ${q.difficulty}</div></div><button class="btn bp bsm" onclick='startQuiz(${JSON.stringify({subject:q.subject,topic:q.topic,questions:q.questions})})'>Start</button></div>`).join('')}</div>`:''}
+    ${myScores.length?`<div class="card"><div class="ch"><div class="ct">📈 Recent Scores</div></div>${myScores.slice(0,6).map(g=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--bdr);font-size:.82rem"><span>${esc(g.subject)}</span><span class="bdg ${g.score>=80?'bgr':g.score>=60?'bg':'bd'}">${g.score}%</span></div>`).join('')}</div>`:''}`;
 }
 function showQCfg(){openM(`<div class="mh"><div class="mt">🧩 Configure Quiz</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Subject</label><input class="inp" id="qs" placeholder="e.g. Operating Systems"></div><div class="fg"><label>Topic (optional)</label><input class="inp" id="qt" placeholder="e.g. Process Scheduling"></div><div class="fr"><div class="fg"><label>Difficulty</label><select class="inp" id="qd"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></div><div class="fg"><label>Questions (max 100)</label><input class="inp" type="number" id="qn" value="10" min="1" max="100"></div></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="genQuiz()">🤖 Generate</button></div>`);}
 function showFCCfg(){openM(`<div class="mh"><div class="mt">🃏 Configure Flashcards</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Subject</label><input class="inp" id="fcs" placeholder="e.g. Data Structures"></div><div class="fg"><label>Topic (optional)</label><input class="inp" id="fct" placeholder="e.g. Binary Trees"></div><div class="fr"><div class="fg"><label>Difficulty</label><select class="inp" id="fcd"><option>Easy</option><option selected>Medium</option><option>Hard</option></select></div><div class="fg"><label>Cards</label><input class="inp" type="number" id="fcn" value="10" min="1" max="50"></div></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="genFC()">🤖 Generate</button></div>`);}
@@ -998,7 +1023,7 @@ function nxtQ(){QS.cur++;QS.ans=false;document.getElementById('panel-learner').i
 function buildQRes(){
   const pct=Math.round(QS.score/QS.questions.length*100);const grade=pct>=90?'A':pct>=80?'B':pct>=70?'C':pct>=60?'D':'F';
   const msg=pct>=80?'Excellent! 🏆':pct>=60?'Good job! 👍':'Keep practising 💪';
-  const grades=DB.grades();grades.push({id:uid(),studentId:CU.id,type:'quiz',subject:QS.subject,topic:QS.topic,score:pct,grade,ts:now()});DB.sgrade(grades);
+  fetch('/api/grades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'quiz',subject:QS.subject,topic:QS.topic,score:pct,grade})}).catch(()=>{});
   return `<div class="ph"><div class="ptt">Quiz Complete!</div></div><div class="qr"><div style="font-size:3rem">🏁</div><div class="rp">${pct}%</div><div class="gc g${grade}" style="margin:9px auto;width:46px;height:46px;font-size:1rem">${grade}</div><div style="font-size:1rem;font-weight:700;margin:9px 0">${msg}</div><div style="color:var(--txm);margin-bottom:22px">${QS.score}/${QS.questions.length} correct</div><div style="display:flex;gap:9px;justify-content:center;flex-wrap:wrap"><button class="btn bp" onclick="startQuiz({subject:QS.subject,topic:QS.topic,questions:QS.questions})">Retry</button><button class="btn bs" onclick="rLearner()">← Back</button></div></div>`;
 }
 function startFC(data){FCS={...data,cur:0,known:0,unk:0,fl:false};document.getElementById('panel-learner').innerHTML=buildFCUI();}
@@ -1020,7 +1045,10 @@ function rateFC(k){if(k)FCS.known++;else FCS.unk++;FCS.cur++;FCS.fl=false;
 }
 function fcN(d){if(FCS.cur+d>=0&&FCS.cur+d<FCS.cards.length){FCS.cur+=d;FCS.fl=false;document.getElementById('panel-learner').innerHTML=buildFCUI();}}
 async function showAssignQ(){
-  const users=DB.users().filter(u=>u.role==='student'&&u.status==='approved');const groups=DB.groups();
+  const [usRes,grpRes]=await Promise.all([fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const users=usRes.ok?usRes.users.filter(u=>u.role==='student'&&u.status==='approved'):[];
+  const groups=grpRes.ok?grpRes.groups:[];
+  window._assignGroups=groups;
   openM(`<div class="mh"><div class="mt">📤 Assign Quiz</div><button class="mx" onclick="closeM()">✕</button></div>
     <div class="fr"><div class="fg"><label>Subject</label><input class="inp" id="asub" placeholder="Mathematics"></div><div class="fg"><label>Topic</label><input class="inp" id="atop" placeholder="Algebra"></div></div>
     <div class="fr"><div class="fg"><label>Difficulty</label><select class="inp" id="adif"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></div><div class="fg"><label>Questions</label><input class="inp" type="number" id="acnt" value="10" min="1" max="100"></div></div>
@@ -1036,10 +1064,10 @@ async function doAssignQ(){
     const raw=await callAI(`Generate ${cnt} MCQ about "${sub}"${top?` on "${top}"`:''}. Difficulty: ${dif}. Return ONLY valid JSON: {"questions":[{"q":"","options":["","","",""],"answer":0,"explanation":""}]}`);
     const d=pJSON(raw);const to=[];const gs=[];
     sel.forEach(s=>{if(s.startsWith('g:'))gs.push(s.slice(2));else to.push(s.slice(2));});
-    gs.forEach(gid=>{const g=DB.groups().find(x=>x.id===gid);if(g)(g.members||[]).forEach(m=>to.push(m));});
-    const uniq=[...new Set(to)];const qs=DB.quizzes();
-    qs.push({id:uid(),createdBy:CU.id,subject:sub,topic:top||sub,difficulty:dif,questions:d.questions,assignedTo:uniq,createdAt:now()});
-    DB.sq(qs);uniq.forEach(u=>pushNotif(u,`New quiz: ${sub}`,'🧩','info'));
+    const groups=window._assignGroups||[];
+    gs.forEach(gid=>{const g=groups.find(x=>x.id===gid);if(g)(g.members||[]).forEach(m=>to.push(m));});
+    const uniq=[...new Set(to)];
+    await fetch('/api/quizzes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subject:sub,topic:top||sub,difficulty:dif,questions:d.questions,assignedTo:uniq})});
     hideLoad();toast('Quiz assigned!','success');
   }catch(e){hideLoad();toast('Failed: '+e.message,'error');}
 }
@@ -1047,16 +1075,18 @@ async function doAssignQ(){
 /* ═══════════════════════════════════════
    ANALYTICS
 ═══════════════════════════════════════ */
-function rAnalytics(){
+async function rAnalytics(){
   const p=document.getElementById('panel-analytics');
-  const isAdmin=CU.role==='admin';
-  const grades=isAdmin?DB.grades():DB.grades().filter(g=>g.studentId===CU.id);
+  p.innerHTML=`<div class="ph"><div class="ptt">Analytics &amp; Progress</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [grRes,usRes]=await Promise.all([fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const allGrades=grRes.ok?grRes.grades:[];const allUsers=usRes.ok?usRes.users:[];window._cachedUsers=allUsers;
+  const grades=CU.role==='admin'?allGrades:allGrades.filter(g=>g.student_id===CU.id||g.studentId===CU.id);
   const qg=grades.filter(g=>g.type==='quiz'),ag=grades.filter(g=>g.type==='assignment');
   const subMap={};qg.forEach(g=>{if(!subMap[g.subject])subMap[g.subject]={t:0,c:0};subMap[g.subject].t+=g.score;subMap[g.subject].c++;});
   const subAvgs=Object.entries(subMap).map(([k,v])=>({s:k,a:Math.round(v.t/v.c)})).sort((a,b)=>b.a-a.a);
   const oa=qg.length?Math.round(qg.reduce((a,g)=>a+g.score,0)/qg.length):null;
-  const all=DB.users().filter(u=>u.role==='student'&&u.status==='approved');
-  const lb=all.map(u=>{const gs=DB.grades().filter(g=>g.studentId===u.id&&g.type==='quiz');const avg=gs.length?Math.round(gs.reduce((a,g)=>a+g.score,0)/gs.length):0;return{u,avg,cnt:gs.length};}).filter(x=>x.cnt>0).sort((a,b)=>b.avg-a.avg);
+  const studs=allUsers.filter(u=>u.role==='student'&&u.status==='approved');
+  const lb=studs.map(u=>{const gs=allGrades.filter(g=>(g.student_id===u.id||g.studentId===u.id)&&g.type==='quiz');const avg=gs.length?Math.round(gs.reduce((a,g)=>a+g.score,0)/gs.length):0;return{u,avg,cnt:gs.length};}).filter(x=>x.cnt>0).sort((a,b)=>b.avg-a.avg);
   p.innerHTML=`<div class="ph"><div class="ptt">Analytics &amp; Progress</div><div class="ps">Performance tracking and insights</div></div>
     <div class="sr"><div class="sb2"><div class="sn" style="color:var(--gold)">${qg.length}</div><div class="sl2">Quizzes Taken</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${oa!==null?oa+'%':'—'}</div><div class="sl2">Overall Avg</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${ag.length}</div><div class="sl2">Graded Work</div></div><div class="sb2"><div class="sn" style="color:var(--prp)">${subAvgs.length}</div><div class="sl2">Subjects Tracked</div></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
@@ -1069,11 +1099,16 @@ function rAnalytics(){
 /* ═══════════════════════════════════════
    CALENDAR
 ═══════════════════════════════════════ */
-function rCalendar(){
+async function rCalendar(){
   const p=document.getElementById('panel-calendar');
-  const evs=DB.events().filter(e=>!e.userId||e.userId===CU.id||CU.role==='admin');
-  DB.assignments().forEach(a=>{if(a.dueDate&&(a.assignedTo?.includes(CU.id)||a.teacherId===CU.id||CU.role==='admin')&&!evs.find(e=>e.aref===a.id))evs.push({id:'a'+a.id,title:'Due: '+a.title,date:a.dueDate,type:'assignment',aref:a.id,userId:CU.id});});
-  DB.schedules().filter(s=>s.userId===CU.id).forEach(s=>(s.subjects||[]).forEach(sub=>{if(sub.examDate&&!evs.find(e=>e.eref===sub.name+sub.examDate))evs.push({id:'e'+uid(),title:'Exam: '+sub.name,date:sub.examDate,type:'exam',eref:sub.name+sub.examDate,userId:CU.id});}));
+  const [evRes,asgRes,schRes]=await Promise.all([
+    fetch('/api/events').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false})),
+  ]);
+  const evs=evRes.ok?evRes.events:[];
+  (asgRes.ok?asgRes.assignments:[]).forEach(a=>{if(a.due_date&&!evs.find(e=>e.aref===a.id))evs.push({id:'a'+a.id,title:'Due: '+a.title,date:a.due_date,type:'assignment',aref:a.id});});
+  (schRes.ok?schRes.schedules:[]).filter(s=>s.user_id===CU.id).forEach(s=>(s.subjects||[]).forEach(sub=>{if(sub.examDate&&!evs.find(e=>e.eref===sub.name+sub.examDate))evs.push({id:'e'+uid(),title:'Exam: '+sub.name,date:sub.examDate,type:'exam',eref:sub.name+sub.examDate});}));
   const fd=new Date(CalY,CalM,1).getDay(),dim=new Date(CalY,CalM+1,0).getDate();
   const tn=new Date();let cells='';let day=1-fd;
   for(let r=0;r<6;r++){
@@ -1097,35 +1132,44 @@ function openEv(date){
     <div class="fr"><div class="fg"><label>Date</label><input class="inp" type="date" id="ed" value="${date}"></div><div class="fg"><label>Type</label><select class="inp" id="ety"><option value="study">Study</option><option value="event">Event</option><option value="reminder">Reminder</option><option value="exam">Exam</option></select></div></div>
     <div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveEv()">Save</button></div>`);
 }
-function saveEv(){const title=document.getElementById('et')?.value.trim(),date=document.getElementById('ed')?.value,type=document.getElementById('ety')?.value;if(!title||!date){toast('Fill all fields','error');return;}const ev=DB.events();ev.push({id:uid(),title,date,type,userId:CU.id,createdAt:now()});DB.se(ev);closeM();rCalendar();toast('Event added','success');}
+async function saveEv(){const title=document.getElementById('et')?.value.trim(),date=document.getElementById('ed')?.value,type=document.getElementById('ety')?.value;if(!title||!date){toast('Fill all fields','error');return;}await fetch('/api/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,date,type})});closeM();rCalendar();toast('Event added','success');}
 
 /* ═══════════════════════════════════════
    FORUM
 ═══════════════════════════════════════ */
-function rForum(){
+async function rForum(){
   const p=document.getElementById('panel-forum');
   if(AFRid){rForumPost(AFRid);return;}
   const canMod=CU.role==='teacher'||CU.role==='admin';
   const cats=['All','General','Mathematics','Science','Technology','Arts','Language','Other'];
   const ac=window._fcat||'All';
-  const posts=DB.forum().filter(x=>ac==='All'||x.category===ac).sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||(b.createdAt-a.createdAt));
+  const r=await fetch('/api/forum').then(x=>x.json()).catch(()=>({ok:false}));
+  const allPosts=r.ok?r.posts:[];
+  const users=window._cachedUsers||(await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false,users:[]}))).users||[];
+  window._cachedUsers=users;
+  const gUc=id=>users.find(u=>u.id===id)||null;
+  const posts=allPosts.filter(x=>ac==='All'||x.category===ac).sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||(b.created_at-a.created_at));
   p.innerHTML=`<div class="ph"><div class="ptt">Discussion Forum</div><div class="ps">Ask questions, share ideas and connect with peers</div></div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:13px;flex-wrap:wrap;gap:9px">
       <div style="display:flex;gap:5px;flex-wrap:wrap">${cats.map(c=>`<button class="btn ${(window._fcat||'All')===c?'bp':'bgh'} bsm" onclick="window._fcat='${c}';rForum()">${c}</button>`).join('')}</div>
       <button class="btn bp" onclick="showNewPost()">✏️ New Post</button>
     </div>
-    ${posts.length?posts.map(post=>{const author=gU(post.authorId);return `<div class="fp" onclick="AFRid='${post.id}';rForum()">
+    ${posts.length?posts.map(post=>{const author=gUc(post.author_id||post.authorId);return `<div class="fp" onclick="AFRid='${post.id}';rForum()">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
-        <div><div class="fpt">${post.pinned?'📌 ':''}${esc(post.title)}</div><div class="fpm">${avEl(author,16)} <span style="margin-left:4px">${esc(author?.name||'?')}</span><span>📁 ${esc(post.category)}</span><span>💬 ${(post.replies||[]).length}</span><span>👍 ${post.votes||0}</span><span style="color:var(--txd)">${fmtDate(post.createdAt)}</span></div></div>
+        <div><div class="fpt">${post.pinned?'📌 ':''}${esc(post.title)}</div><div class="fpm">${avEl(author,16)} <span style="margin-left:4px">${esc(author?.name||'?')}</span><span>📁 ${esc(post.category)}</span><span>💬 ${(post.replies||[]).length}</span><span>👍 ${post.votes||0}</span><span style="color:var(--txd)">${fmtDate(post.created_at||post.createdAt)}</span></div></div>
         ${canMod?`<div style="display:flex;gap:4px" onclick="event.stopPropagation()"><button class="btn bgh bxs" onclick="pinPost('${post.id}')">${post.pinned?'Unpin':'Pin'}</button><button class="btn br bxs" onclick="delPost('${post.id}')">Del</button></div>`:''}
-      </div><div class="fpb">${esc(post.body.slice(0,175))}${post.body.length>175?'…':''}</div></div>`;}).join(''):
+      </div><div class="fpb">${esc((post.body||'').slice(0,175))}${(post.body||'').length>175?'…':''}</div></div>`;}).join(''):
     `<div class="es"><div class="ei">💬</div><p>No posts yet. Be the first!</p></div>`}`;
 }
-function rForumPost(id){
+async function rForumPost(id){
   const p=document.getElementById('panel-forum');
-  const post=DB.forum().find(x=>x.id===id);if(!post){AFRid=null;rForum();return;}
-  const author=gU(post.authorId);const canMod=CU.role==='teacher'||CU.role==='admin';
-  const reps=(post.replies||[]).map(r=>{const ra=gU(r.authorId);return `<div class="fr2"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">${avEl(ra,24)}<span style="font-weight:600;font-size:.82rem;margin-left:6px">${esc(ra?.name||'?')}</span><span style="margin-left:auto;font-size:.71rem;color:var(--txm)">${fmtDate(r.createdAt)}</span>${canMod?`<button class="btn br bxs" style="margin-left:5px" onclick="delReply('${post.id}','${r.id}')">Del</button>`:''}</div><div style="font-size:.84rem;line-height:1.6">${esc(r.body)}</div></div>`;}).join('');
+  const r=await fetch('/api/forum').then(x=>x.json()).catch(()=>({ok:false}));
+  const post=(r.ok?r.posts:[]).find(x=>x.id===id);if(!post){AFRid=null;rForum();return;}
+  const users=window._cachedUsers||(await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false,users:[]}))).users||[];
+  window._cachedUsers=users;
+  const gUc=uid2=>users.find(u=>u.id===uid2)||null;
+  const author=gUc(post.author_id||post.authorId);const canMod=CU.role==='teacher'||CU.role==='admin';
+  const reps=(post.replies||[]).map(rep=>{const ra=gUc(rep.author_id||rep.authorId);return `<div class="fr2"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">${avEl(ra,24)}<span style="font-weight:600;font-size:.82rem;margin-left:6px">${esc(ra?.name||'?')}</span><span style="margin-left:auto;font-size:.71rem;color:var(--txm)">${fmtDate(rep.created_at||rep.createdAt)}</span>${canMod?`<button class="btn br bxs" style="margin-left:5px" onclick="delReply('${post.id}','${rep.id}')">Del</button>`:''}</div><div style="font-size:.84rem;line-height:1.6">${esc(rep.body)}</div></div>`;}).join('');
   p.innerHTML=`<div class="ph"><button class="btn bgh bsm" onclick="AFRid=null;rForum()" style="margin-bottom:7px">← Back</button><div class="ptt">${esc(post.title)}</div></div>
     <div class="card" style="margin-bottom:13px"><div style="display:flex;align-items:center;gap:9px;margin-bottom:11px">${avEl(author,34)}<div><div style="font-weight:700">${esc(author?.name||'?')}</div><div style="font-size:.73rem;color:var(--txm)">${esc(post.category)} · ${fmtDate(post.createdAt)}</div></div></div>
       <div style="font-size:.87rem;line-height:1.7;margin-bottom:13px">${esc(post.body)}</div>
@@ -1141,219 +1185,254 @@ function showNewPost(){
   const cats=['General','Mathematics','Science','Technology','Arts','Language','Other'];
   openM(`<div class="mh"><div class="mt">✏️ New Post</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Title</label><input class="inp" id="pt" placeholder="What's your question?"></div><div class="fg"><label>Category</label><select class="inp" id="pc">${cats.map(c=>`<option>${c}</option>`).join('')}</select></div><div class="fg"><label>Body</label><textarea class="inp" id="pb2" rows="5" placeholder="Describe in detail…"></textarea></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="submitPost()">Post</button></div>`);
 }
-function submitPost(){const t=document.getElementById('pt')?.value.trim(),c=document.getElementById('pc')?.value,b=document.getElementById('pb2')?.value.trim();if(!t||!b){toast('Fill title and body','error');return;}const f=DB.forum();f.push({id:uid(),title:t,category:c,body:b,authorId:CU.id,votes:0,votedBy:[],replies:[],pinned:false,createdAt:now()});DB.sfr(f);closeM();rForum();toast('Post published!','success');}
-function submitReply(pid){const b=document.getElementById('rb')?.value.trim();if(!b){toast('Write something','error');return;}const f=DB.forum();const po=f.find(x=>x.id===pid);if(!po)return;if(!po.replies)po.replies=[];po.replies.push({id:uid(),authorId:CU.id,body:b,createdAt:now()});DB.sfr(f);rForumPost(pid);pushNotif(po.authorId,`${CU.name} replied to: ${po.title}`,'💬','info');}
-function votePost(id){const f=DB.forum();const po=f.find(x=>x.id===id);if(!po)return;if(!po.votedBy)po.votedBy=[];if(po.votedBy.includes(CU.id)){po.votedBy=po.votedBy.filter(v=>v!==CU.id);po.votes=(po.votes||1)-1;}else{po.votedBy.push(CU.id);po.votes=(po.votes||0)+1;}DB.sfr(f);rForumPost(id);}
-function pinPost(id){const f=DB.forum();const po=f.find(x=>x.id===id);if(po){po.pinned=!po.pinned;DB.sfr(f);rForum();}}
-function delPost(id){if(!confirm('Delete post?'))return;DB.sfr(DB.forum().filter(x=>x.id!==id));rForum();toast('Deleted','info');}
-function delReply(pid,rid){const f=DB.forum();const po=f.find(x=>x.id===pid);if(po){po.replies=(po.replies||[]).filter(r=>r.id!==rid);DB.sfr(f);rForumPost(pid);}}
+function submitPost(){const t=document.getElementById('pt')?.value.trim(),c=document.getElementById('pc')?.value,b=document.getElementById('pb2')?.value.trim();if(!t||!b){toast('Fill title and body','error');return;}fetch('/api/forum',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,category:c,body:b})}).then(()=>{window._cachedUsers=null;closeM();rForum();toast('Post published!','success');});}
+async function submitReply(pid){const b=document.getElementById('rb')?.value.trim();if(!b){toast('Write something','error');return;}await fetch(`/api/forum/${pid}/replies`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:b})});window._cachedUsers=null;rForumPost(pid);}
+async function votePost(id){await fetch(`/api/forum/${id}/pin`,{method:'PUT'});window._cachedUsers=null;rForumPost(id);}
+async function pinPost(id){await fetch(`/api/forum/${id}/pin`,{method:'PUT'});window._cachedUsers=null;rForum();}
+async function delPost(id){if(!confirm('Delete post?'))return;await fetch(`/api/forum/${id}`,{method:'DELETE'});window._cachedUsers=null;rForum();toast('Deleted','info');}
+async function delReply(pid,rid){await fetch(`/api/forum/${pid}/replies/${rid}`,{method:'DELETE'});window._cachedUsers=null;rForumPost(pid);}
 
 /* ═══════════════════════════════════════
    LIBRARY
 ═══════════════════════════════════════ */
-function rLibrary(){
+async function rLibrary(){
   const p=document.getElementById('panel-library');
   const canAdd=CU.role==='teacher'||CU.role==='admin';
   const types=['All','Article','Video','PDF','Note','Tool','Other'];
   const at=window._ltype||'All';const q=(window._lq||'').toLowerCase();
-  const res=DB.resources().filter(r=>(at==='All'||r.type===at)&&(!q||r.title.toLowerCase().includes(q)||r.subject?.toLowerCase().includes(q)));
+  const r=await fetch('/api/resources').then(x=>x.json()).catch(()=>({ok:false}));
+  const allRes=r.ok?r.resources:[];
+  const users=window._cachedUsers||(await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false,users:[]}))).users||[];
+  window._cachedUsers=users;
+  const res=allRes.filter(r2=>(at==='All'||r2.type===at)&&(!q||(r2.title||'').toLowerCase().includes(q)||(r2.subject||'').toLowerCase().includes(q)));
   p.innerHTML=`<div class="ph"><div class="ptt">Resource Library</div><div class="ps">Educational materials, articles, videos and tools</div></div>
     <div style="display:flex;gap:7px;margin-bottom:13px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:180px"><input class="inp" placeholder="🔍 Search resources…" value="${esc(window._lq||'')}" oninput="window._lq=this.value;rLibrary()"></div>${canAdd?`<button class="btn bp" onclick="showAddRes()">+ Add Resource</button>`:''}</div>
     <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px">${types.map(t=>`<button class="btn ${(window._ltype||'All')===t?'bp':'bgh'} bsm" onclick="window._ltype='${t}';rLibrary()">${t}</button>`).join('')}</div>
-    ${res.length?`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(272px,1fr));gap:13px">${res.map(r=>{const ic={Article:'📰',Video:'🎬',PDF:'📄',Note:'📝',Tool:'🛠️',Other:'📎'};const auth=gU(r.uploadedBy);return `<div class="rc2"><div class="rty" style="color:var(--gold)">${ic[r.type]||'📎'} ${r.type}</div><div class="rtt">${esc(r.title)}</div><div class="rds">${esc(r.desc||'')}</div><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:5px"><span class="bdg bb2">${esc(r.subject||'General')}</span>${r.url?`<a href="${esc(r.url)}" target="_blank" class="btn bp bxs">Open →</a>`:''} ${canAdd||r.uploadedBy===CU.id?`<button class="btn br bxs" onclick="delRes('${r.id}')">Del</button>`:''}</div><div style="font-size:.71rem;color:var(--txm);margin-top:5px">By ${esc(auth?.name||'?')} · ${fmtDate(r.createdAt)}</div></div>`;}).join('')}</div>`:`<div class="es"><div class="ei">📚</div><p>No resources found${canAdd?'. Add some!':''}</p></div>`}`;
+    ${res.length?`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(272px,1fr));gap:13px">${res.map(r2=>{const ic={Article:'📰',Video:'🎬',PDF:'📄',Note:'📝',Tool:'🛠️',Other:'📎'};const auth=users.find(u=>u.id===(r2.uploaded_by||r2.uploadedBy));return `<div class="rc2"><div class="rty" style="color:var(--gold)">${ic[r2.type]||'📎'} ${r2.type}</div><div class="rtt">${esc(r2.title)}</div><div class="rds">${esc(r2.description||r2.desc||'')}</div><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:5px"><span class="bdg bb2">${esc(r2.subject||'General')}</span>${r2.url?`<a href="${esc(r2.url)}" target="_blank" class="btn bp bxs">Open →</a>`:''} ${canAdd||(r2.uploaded_by||r2.uploadedBy)===CU.id?`<button class="btn br bxs" onclick="delRes('${r2.id}')">Del</button>`:''}</div><div style="font-size:.71rem;color:var(--txm);margin-top:5px">By ${esc(auth?.name||'?')} · ${fmtDate(r2.created_at||r2.createdAt)}</div></div>`;}).join('')}</div>`:`<div class="es"><div class="ei">📚</div><p>No resources found${canAdd?'. Add some!':''}</p></div>`}`;
 }
 function showAddRes(){openM(`<div class="mh"><div class="mt">📚 Add Resource</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Title</label><input class="inp" id="rt" placeholder="Resource title"></div><div class="fr"><div class="fg"><label>Type</label><select class="inp" id="rty"><option>Article</option><option>Video</option><option>PDF</option><option>Note</option><option>Tool</option><option>Other</option></select></div><div class="fg"><label>Subject</label><input class="inp" id="rsu" placeholder="e.g. Mathematics"></div></div><div class="fg"><label>Description</label><textarea class="inp" id="rds" rows="2" placeholder="Brief description…"></textarea></div><div class="fg"><label>URL / Link</label><input class="inp" id="ru" placeholder="https://…" type="url"></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveRes()">Add</button></div>`);}
-function saveRes(){const t=document.getElementById('rt')?.value.trim();if(!t){toast('Enter title','error');return;}const r=DB.resources();r.push({id:uid(),title:t,type:document.getElementById('rty')?.value,subject:document.getElementById('rsu')?.value||null,desc:document.getElementById('rds')?.value,url:document.getElementById('ru')?.value||null,uploadedBy:CU.id,createdAt:now()});DB.sr2(r);closeM();rLibrary();toast('Added!','success');}
-function delRes(id){if(!confirm('Delete?'))return;DB.sr2(DB.resources().filter(r=>r.id!==id));rLibrary();}
+async function saveRes(){const t=document.getElementById('rt')?.value.trim();if(!t){toast('Enter title','error');return;}await fetch('/api/resources',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,type:document.getElementById('rty')?.value,subject:document.getElementById('rsu')?.value||null,description:document.getElementById('rds')?.value,url:document.getElementById('ru')?.value||null})});closeM();rLibrary();toast('Added!','success');}
+async function delRes(id){if(!confirm('Delete?'))return;await fetch(`/api/resources/${id}`,{method:'DELETE'});rLibrary();}
 
 /* ═══════════════════════════════════════
    CLASSROOMS
 ═══════════════════════════════════════ */
-function rClassrooms(){
+async function rClassrooms(){
   const p=document.getElementById('panel-classrooms');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const myC=isTA?DB.classrooms().filter(c=>CU.role==='admin'||c.teacherId===CU.id):DB.classrooms().filter(c=>(c.students||[]).includes(CU.id));
+  p.innerHTML=`<div class="ph"><div class="ptt">Classrooms</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [crRes,usRes]=await Promise.all([fetch('/api/classrooms').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const allC=crRes.ok?crRes.classrooms:[];
+  window._cachedUsers=usRes.ok?usRes.users:window._cachedUsers||[];
+  const myC=isTA?allC.filter(c=>CU.role==='admin'||c.teacher_id===CU.id):allC.filter(c=>(c.students||[]).includes(CU.id));
   p.innerHTML=`<div class="ph"><div class="ptt">Classrooms</div><div class="ps">${isTA?'Create and manage your classes':'Your enrolled classes'}</div></div>
     ${isTA?`<button class="btn bp" style="margin-bottom:14px" onclick="showCreateCR()">+ Create Classroom</button>`:''}
     ${myC.length?myC.map(c=>`<div class="card" style="margin-bottom:11px"><div class="ch"><div class="ct">🏫 ${esc(c.name)} <span class="bdg bg">${(c.students||[]).length} students</span>${c.year?`<span class="bdg bb2">${c.year}</span>`:''}</div><div style="display:flex;gap:6px"><button class="btn bs bsm" onclick="viewCR('${c.id}')">Open</button>${isTA?`<button class="btn br bsm" onclick="delCR('${c.id}')">🗑</button>`:''}</div></div>${c.description?`<div style="font-size:.81rem;color:var(--txm)">${esc(c.description)}</div>`:''}</div>`).join(''):`<div class="es"><div class="ei">🏫</div><p>No classrooms${isTA?' yet.':' — await enrolment.'}</p></div>`}`;
 }
-function showCreateCR(){
-  const studs=DB.users().filter(u=>u.role==='student'&&u.status==='approved');
+async function showCreateCR(){
+  const usRes=await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}));
+  const studs=usRes.ok?usRes.users.filter(u=>u.role==='student'&&u.status==='approved'):[];
   openM(`<div class="mh"><div class="mt">🏫 Create Classroom</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Class Name</label><input class="inp" id="crn" placeholder="e.g. CS301 — Operating Systems"></div><div class="fr"><div class="fg"><label>Year</label><select class="inp" id="cry"><option value="">All</option><option value="1st">1st</option><option value="2nd">2nd</option><option value="3rd">3rd</option></select></div><div class="fg"><label>Subject</label><input class="inp" id="crs" placeholder="e.g. Computer Science"></div></div><div class="fg"><label>Description</label><textarea class="inp" id="crd" rows="2" placeholder="Class overview…"></textarea></div><div class="fg"><label>Add Students</label><select class="inp" id="crst" multiple style="height:100px">${studs.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.year||''})</option>`).join('')}</select></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveCR()">Create</button></div>`);
 }
-function saveCR(){const n=document.getElementById('crn')?.value.trim();if(!n){toast('Name required','error');return;}const y=document.getElementById('cry')?.value,s=document.getElementById('crs')?.value,d=document.getElementById('crd')?.value,studs=[...(document.getElementById('crst').selectedOptions||[])].map(o=>o.value);const cr=DB.classrooms();cr.push({id:uid(),name:n,year:y||null,subject:s||null,description:d||null,teacherId:CU.id,students:studs,announcements:[],createdAt:now()});DB.sc2(cr);studs.forEach(sid=>pushNotif(sid,`Enrolled in: ${n}`,'🏫','info'));closeM();rClassrooms();toast('Classroom created!','success');}
-function delCR(id){if(!confirm('Delete?'))return;DB.sc2(DB.classrooms().filter(c=>c.id!==id));rClassrooms();}
-function viewCR(id){
-  const c=DB.classrooms().find(x=>x.id===id);if(!c)return;
-  const isTA=CU.role==='teacher'||CU.role==='admin';const teacher=gU(c.teacherId);
-  const mhtml=(c.students||[]).map(sid=>{const u=gU(sid);return u?`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bdr)">${avEl(u,26)}<span style="font-size:.84rem;flex:1">${esc(u.name)}</span><span style="font-size:.73rem;color:var(--txm)">${u.year||''}</span>${isTA?`<button class="btn br bxs" onclick="rmSCR('${id}','${sid}')">✕</button>`:''}</div>`:''}).join('');
-  const annh=(c.announcements||[]).map(a=>`<div class="anc"><div class="ant">${esc(a.title)}</div><div style="font-size:.72rem;color:var(--txm);margin-bottom:3px">${fmtDate(a.ts)}</div><div class="anb">${esc(a.body)}</div></div>`).join('');
+async function saveCR(){const n=document.getElementById('crn')?.value.trim();if(!n){toast('Name required','error');return;}const y=document.getElementById('cry')?.value,s=document.getElementById('crs')?.value,d=document.getElementById('crd')?.value,studs=[...(document.getElementById('crst').selectedOptions||[])].map(o=>o.value);await fetch('/api/classrooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,year:y||null,subject:s||null,description:d||null,students:studs})});closeM();rClassrooms();toast('Classroom created!','success');}
+async function delCR(id){if(!confirm('Delete?'))return;await fetch(`/api/classrooms/${id}`,{method:'DELETE'});rClassrooms();}
+async function viewCR(id){
+  const [crRes,usRes]=await Promise.all([fetch('/api/classrooms').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const c=(crRes.ok?crRes.classrooms:[]).find(x=>x.id===id);if(!c)return;
+  const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
+  const isTA=CU.role==='teacher'||CU.role==='admin';
+  const teacher=users.find(u=>u.id===(c.teacher_id||c.teacherId));
+  const mhtml=(c.students||[]).map(sid=>{const u=users.find(x=>x.id===sid);return u?`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bdr)">${avEl(u,26)}<span style="font-size:.84rem;flex:1">${esc(u.name)}</span><span style="font-size:.73rem;color:var(--txm)">${u.year||''}</span>${isTA?`<button class="btn br bxs" onclick="rmSCR('${id}','${sid}')">✕</button>`:''}</div>`:''}).join('');
+  const availStuds=users.filter(u=>u.role==='student'&&u.status==='approved'&&!(c.students||[]).includes(u.id));
   openM(`<div class="mh"><div class="mt">🏫 ${esc(c.name)}</div><button class="mx" onclick="closeM(2)">✕</button></div>
     <div style="display:flex;gap:9px;margin-bottom:13px;flex-wrap:wrap">${c.year?`<span class="bdg bb2">${c.year}</span>`:''} ${c.subject?`<span class="bdg bg">${esc(c.subject)}</span>`:''}<span style="font-size:.79rem;color:var(--txm)">Teacher: ${esc(teacher?.name||'?')}</span></div>
     <div class="tbr"><div class="tb2 on" onclick="swCRTab(this,'cra')">Announcements</div><div class="tb2" onclick="swCRTab(this,'crm')">Students (${(c.students||[]).length})</div></div>
-    <div id="cra" class="tbc on">${isTA?`<div style="margin-bottom:11px"><input class="inp" id="crannT" placeholder="Title" style="margin-bottom:6px"><textarea class="inp" id="crannB" rows="2" placeholder="Body…"></textarea><button class="btn bp bsm" style="margin-top:6px" onclick="postCRAnn('${id}')">Post</button></div>`:''}<div>${annh||'<p style="color:var(--txm);font-size:.82rem">No announcements</p>'}</div></div>
-    <div id="crm" class="tbc">${mhtml||'<p style="color:var(--txm);font-size:.82rem">No students enrolled</p>'}${isTA?`<hr class="sdiv"><div class="fg"><label>Enrol Student</label><div style="display:flex;gap:6px"><select class="inp" id="crAddSt">${DB.users().filter(u=>u.role==='student'&&u.status==='approved'&&!(c.students||[]).includes(u.id)).map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button class="btn bp bsm" onclick="addSCR('${id}')">Add</button></div></div>`:''}</div>`,2);
+    <div id="cra" class="tbc on">${isTA?`<div style="margin-bottom:11px"><input class="inp" id="crannT" placeholder="Title" style="margin-bottom:6px"><textarea class="inp" id="crannB" rows="2" placeholder="Body…"></textarea><button class="btn bp bsm" style="margin-top:6px" onclick="postCRAnn('${id}')">Post</button></div>`:''}<div><p style="color:var(--txm);font-size:.82rem">Classroom announcements go here</p></div></div>
+    <div id="crm" class="tbc">${mhtml||'<p style="color:var(--txm);font-size:.82rem">No students enrolled</p>'}${isTA?`<hr class="sdiv"><div class="fg"><label>Enrol Student</label><div style="display:flex;gap:6px"><select class="inp" id="crAddSt">${availStuds.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button class="btn bp bsm" onclick="addSCR('${id}')">Add</button></div></div>`:''}</div>`,2);
 }
 function swCRTab(el,id){document.querySelectorAll('.tb2').forEach(b=>b.classList.remove('on'));el.classList.add('on');document.querySelectorAll('.tbc').forEach(c=>c.classList.remove('on'));document.getElementById(id)?.classList.add('on');}
-function postCRAnn(crid){const t=document.getElementById('crannT')?.value.trim(),b=document.getElementById('crannB')?.value.trim();if(!t||!b){toast('Fill title and body','error');return;}const crs=DB.classrooms();const c=crs.find(x=>x.id===crid);if(!c)return;if(!c.announcements)c.announcements=[];c.announcements.unshift({id:uid(),title:t,body:b,authorId:CU.id,ts:now()});DB.sc2(crs);(c.students||[]).forEach(sid=>pushNotif(sid,`New in ${c.name}: ${t}`,'📢','info'));closeM(2);rClassrooms();toast('Posted!','success');}
-function addSCR(crid){const sid=document.getElementById('crAddSt')?.value;if(!sid)return;const crs=DB.classrooms();const c=crs.find(x=>x.id===crid);if(c){if(!c.students)c.students=[];c.students.push(sid);DB.sc2(crs);closeM(2);viewCR(crid);pushNotif(sid,`Enrolled in: ${c.name}`,'🏫','info');}}
-function rmSCR(crid,sid){const crs=DB.classrooms();const c=crs.find(x=>x.id===crid);if(c){c.students=(c.students||[]).filter(s=>s!==sid);DB.sc2(crs);closeM(2);viewCR(crid);}}
+async function postCRAnn(crid){const t=document.getElementById('crannT')?.value.trim(),b=document.getElementById('crannB')?.value.trim();if(!t||!b){toast('Fill title and body','error');return;}await fetch('/api/announcements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,body:b,targetRole:'all'})});closeM(2);rClassrooms();toast('Posted!','success');}
+async function addSCR(crid){const sid=document.getElementById('crAddSt')?.value;if(!sid)return;await fetch(`/api/classrooms/${crid}/students`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({studentId:sid})});closeM(2);viewCR(crid);}
+async function rmSCR(crid,sid){await fetch(`/api/classrooms/${crid}/students/${sid}`,{method:'DELETE'});closeM(2);viewCR(crid);}
 
 /* ═══════════════════════════════════════
    ANNOUNCEMENTS
 ═══════════════════════════════════════ */
-function rAnn(){
+async function rAnn(){
   const p=document.getElementById('panel-announcements');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const anns=DB.announcements().filter(a=>!a.targetRole||a.targetRole==='all'||a.targetRole===CU.role).sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||(b.createdAt-a.createdAt));
+  p.innerHTML=`<div class="ph"><div class="ptt">Announcements</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [annRes,usRes]=await Promise.all([fetch('/api/announcements').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
+  const anns=(annRes.ok?annRes.announcements:[]).filter(a=>!a.target_role||a.target_role==='all'||a.target_role===CU.role).sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||(b.created_at-a.created_at));
   p.innerHTML=`<div class="ph"><div class="ptt">Announcements</div><div class="ps">Important notices from staff and administration</div></div>
     ${isTA?`<button class="btn bp" style="margin-bottom:14px" onclick="showCreateAnn()">📢 New Announcement</button>`:''}
-    ${anns.length?anns.map(a=>{const author=gU(a.authorId);return `<div class="anc"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">${a.pinned?'<span class="pnt">📌 Pinned</span>':''}<span class="bdg ${a.targetRole==='all'?'bg':a.targetRole==='teacher'?'bb2':'bgr'}">${a.targetRole||'all'}</span></div><div class="ant">${esc(a.title)}</div><div class="anm">${avEl(author,15)} <span style="margin-left:3px">${esc(author?.name||'Admin')}</span><span>${fmtDate(a.createdAt)}</span></div></div>${isTA?`<div style="display:flex;gap:4px"><button class="btn bgh bxs" onclick="pinAnn('${a.id}')">${a.pinned?'Unpin':'Pin'}</button><button class="btn br bxs" onclick="delAnn('${a.id}')">Del</button></div>`:''}</div><div class="anb">${esc(a.body)}</div></div>`;}).join(''):`<div class="es"><div class="ei">📢</div><p>No announcements</p></div>`}`;
+    ${anns.length?anns.map(a=>{const author=users.find(u=>u.id===(a.author_id||a.authorId));return `<div class="anc"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">${a.pinned?'<span class="pnt">📌 Pinned</span>':''}<span class="bdg ${(a.target_role||a.targetRole)==='all'?'bg':(a.target_role||a.targetRole)==='teacher'?'bb2':'bgr'}">${a.target_role||a.targetRole||'all'}</span></div><div class="ant">${esc(a.title)}</div><div class="anm">${avEl(author,15)} <span style="margin-left:3px">${esc(author?.name||'Admin')}</span><span>${fmtDate(a.created_at||a.createdAt)}</span></div></div>${isTA?`<div style="display:flex;gap:4px"><button class="btn bgh bxs" onclick="pinAnn('${a.id}')">${a.pinned?'Unpin':'Pin'}</button><button class="btn br bxs" onclick="delAnn('${a.id}')">Del</button></div>`:''}</div><div class="anb">${esc(a.body)}</div></div>`;}).join(''):`<div class="es"><div class="ei">📢</div><p>No announcements</p></div>`}`;
 }
 function showCreateAnn(){openM(`<div class="mh"><div class="mt">📢 New Announcement</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Title</label><input class="inp" id="ant2" placeholder="Announcement title"></div><div class="fg"><label>Body</label><textarea class="inp" id="anb2" rows="4" placeholder="Content…"></textarea></div><div class="fg"><label>Audience</label><select class="inp" id="anr"><option value="all">Everyone</option><option value="student">Students only</option><option value="teacher">Teachers only</option></select></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveAnn2()">Post</button></div>`);}
-function saveAnn2(){const t=document.getElementById('ant2')?.value.trim(),b=document.getElementById('anb2')?.value.trim(),r=document.getElementById('anr')?.value;if(!t||!b){toast('Fill all fields','error');return;}const anns=DB.announcements();anns.push({id:uid(),title:t,body:b,targetRole:r,authorId:CU.id,pinned:false,createdAt:now()});DB.san(anns);DB.users().filter(u=>u.status==='approved'&&(r==='all'||u.role===r)).forEach(u=>pushNotif(u.id,`New announcement: ${t}`,'📢','info'));closeM();rAnn();toast('Posted!','success');logAct('ANNOUNCEMENT',t);}
-function pinAnn(id){const a=DB.announcements();const x=a.find(n=>n.id===id);if(x){x.pinned=!x.pinned;DB.san(a);rAnn();}}
-function delAnn(id){if(!confirm('Delete?'))return;DB.san(DB.announcements().filter(a=>a.id!==id));rAnn();}
+async function saveAnn2(){const t=document.getElementById('ant2')?.value.trim(),b=document.getElementById('anb2')?.value.trim(),r=document.getElementById('anr')?.value;if(!t||!b){toast('Fill all fields','error');return;}await fetch('/api/announcements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,body:b,targetRole:r})});closeM();rAnn();toast('Posted!','success');logAct('ANNOUNCEMENT',t);}
+async function pinAnn(id){await fetch(`/api/announcements/${id}/pin`,{method:'PUT'});rAnn();}
+async function delAnn(id){if(!confirm('Delete?'))return;await fetch(`/api/announcements/${id}`,{method:'DELETE'});rAnn();}
 
 /* ═══════════════════════════════════════
    GROUPS
 ═══════════════════════════════════════ */
-function rGroups(){
+async function rGroups(){
   const p=document.getElementById('panel-groups');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const myG=CU.role==='admin'?DB.groups():DB.groups().filter(g=>(g.members||[]).includes(CU.id)||g.createdBy===CU.id);
+  const [grpRes,msgRes]=await Promise.all([fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false})),AGid?fetch(`/api/messages/group/${AGid}`).then(x=>x.json()).catch(()=>({ok:false})):Promise.resolve({ok:false})]);
+  const allG=grpRes.ok?grpRes.groups:[];
+  window._grpMsgs=msgRes.ok?msgRes.messages:[];
+  const myG=CU.role==='admin'?allG:allG.filter(g=>(g.members||[]).includes(CU.id)||g.created_by===CU.id);
   p.innerHTML=`<div class="ph"><div class="ptt">Groups</div></div>
     ${isTA?`<button class="btn bp" style="margin-bottom:13px" onclick="showCreateG()">+ Create Group</button>`:''}
     <div class="cl cl2">
       <div class="clp"><div class="clh"><span style="font-weight:700;font-size:.84rem">Groups</span><span class="bdg bg">${myG.length}</span></div>
         ${myG.map(g=>`<div class="ci ${AGid===g.id?'on':''}" onclick="AGid='${g.id}';rGroups()"><div class="cav cavs" style="background:var(--gold-d);color:var(--gold)">${esc(g.name[0])}</div><div class="cii"><div class="cin">${esc(g.name)}</div><div class="cis">${(g.members||[]).length} members${g.year?' · '+g.year:''}</div></div></div>`).join('')||'<div style="padding:14px;text-align:center;color:var(--txm);font-size:.81rem">No groups</div>'}
       </div>
-      <div class="cp" id="gcp">${AGid?buildGChat(AGid):`<div class="ce"><div class="ei">👥</div>Select a group</div>`}</div>
+      <div class="cp" id="gcp">${AGid?buildGChat(AGid,allG):`<div class="ce"><div class="ei">👥</div>Select a group</div>`}</div>
     </div>`;
+  if(AGid)setTimeout(()=>{const el=document.getElementById('gmsg');if(el)el.scrollTop=el.scrollHeight;},60);
 }
-function buildGChat(gid){
-  const g=DB.groups().find(x=>x.id===gid);if(!g)return '<div class="ce">Not found</div>';
-  const msgs=DB.messages().filter(m=>m.groupId===gid&&m.type==='group').sort((a,b)=>a.ts-b.ts);
+function buildGChat(gid,allG){
+  const g=(allG||[]).find(x=>x.id===gid);if(!g)return '<div class="ce">Not found</div>';
+  const msgs=(window._grpMsgs||[]).sort((a,b)=>a.ts-b.ts);
+  const users=window._cachedUsers||[];
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const mh=msgs.map(m=>{const s=gU(m.fromId);const own=m.fromId===CU.id;return `<div class="mb2 ${own?'own':'oth'}"><div class="sn2">${!own?esc(s?.name||'?'):''}</div><div class="bub ${m.ct==='note'?'bubn':''}">${esc(m.content)}</div><div class="bm">${fmtTime(m.ts)}${isTA&&!own?` · <button class="btn bgh bxs" style="font-size:.62rem;padding:1px 4px" onclick="delMsg('${m.id}')">del</button>`:''}</div></div>`;}).join('');
+  const mh=msgs.map(m=>{const s=users.find(u=>u.id===(m.from_id||m.fromId));const own=(m.from_id||m.fromId)===CU.id;return `<div class="mb2 ${own?'own':'oth'}"><div class="sn2">${!own?esc(s?.name||'?'):''}</div><div class="bub ${m.content_type==='note'||m.ct==='note'?'bubn':''}">${esc(m.content)}</div><div class="bm">${fmtTime(m.ts)}${isTA&&!own?` · <button class="btn bgh bxs" style="font-size:.62rem;padding:1px 4px" onclick="delMsg('${m.id}')">del</button>`:''}</div></div>`;}).join('');
   return `<div class="ch2"><div class="cav cavs" style="background:var(--gold-d);color:var(--gold);width:32px;height:32px">${esc(g.name[0])}</div><div style="margin-left:6px"><div style="font-weight:700;font-size:.87rem">${esc(g.name)}</div><div style="font-size:.71rem;color:var(--txm)">${(g.members||[]).length} members</div></div><div style="margin-left:auto;display:flex;gap:5px">${isTA?`<button class="bi" onclick="mgGroup('${gid}')" title="Manage">⚙️</button>`:''}</div></div>
     <div class="cm" id="gmsg">${mh||'<div class="ce" style="padding:30px"><div class="ei">💬</div>No messages yet</div>'}</div>
     <div class="cia">${isTA?`<button class="bi" onclick="sendGNote('${gid}')" title="Note">📝</button>`:''}<input class="inp" id="ginp" placeholder="Message…" onkeydown="if(event.key==='Enter')sendGMsg('${gid}')"><button class="btn bp bsm" onclick="sendGMsg('${gid}')">Send</button></div>`;
 }
-function sendGMsg(gid){const inp=document.getElementById('ginp');const c=inp?.value.trim();if(!c)return;const m=DB.messages();m.push({id:uid(),type:'group',groupId:gid,fromId:CU.id,content:c,ct:'text',ts:now()});DB.sm(m);inp.value='';rGroups();setTimeout(()=>{const el=document.getElementById('gmsg');if(el)el.scrollTop=el.scrollHeight;},50);}
-function sendGNote(gid){const n=prompt('Note content:');if(!n)return;const m=DB.messages();m.push({id:uid(),type:'group',groupId:gid,fromId:CU.id,content:n,ct:'note',ts:now()});DB.sm(m);rGroups();toast('Note sent!','success');}
-function delMsg(id){if(CU.role!=='teacher'&&CU.role!=='admin'){toast('Insufficient permissions','error');return;}DB.sm(DB.messages().filter(m=>m.id!==id));rGroups();}
-function showCreateG(){
-  const studs=DB.users().filter(u=>u.role==='student'&&u.status==='approved');
+async function sendGMsg(gid){const inp=document.getElementById('ginp');const c=inp?.value.trim();if(!c)return;await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'group',groupId:gid,content:c,contentType:'text'})});inp.value='';rGroups();}
+async function sendGNote(gid){const n=prompt('Note content:');if(!n)return;await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'group',groupId:gid,content:n,contentType:'note'})});rGroups();toast('Note sent!','success');}
+async function delMsg(id){if(CU.role!=='teacher'&&CU.role!=='admin'){toast('Insufficient permissions','error');return;}await fetch(`/api/messages/${id}`,{method:'DELETE'});rGroups();}
+async function showCreateG(){
+  const usRes=await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}));
+  const studs=usRes.ok?usRes.users.filter(u=>u.role==='student'&&u.status==='approved'):[];
   openM(`<div class="mh"><div class="mt">👥 Create Group</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Group Name</label><input class="inp" id="gn2" placeholder="e.g. CS Year 1"></div><div class="fr"><div class="fg"><label>Year</label><select class="inp" id="gy2"><option value="">All</option><option value="1st">1st</option><option value="2nd">2nd</option><option value="3rd">3rd</option></select></div><div class="fg"><label>Description</label><input class="inp" id="gd2" placeholder="Purpose…"></div></div><div class="fg"><label>Add Members</label><select class="inp" id="gm2" multiple style="height:100px">${studs.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.year||''})</option>`).join('')}</select></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveG()">Create</button></div>`);
 }
-function saveG(){const n=document.getElementById('gn2')?.value.trim();if(!n){toast('Name required','error');return;}const y=document.getElementById('gy2')?.value,d=document.getElementById('gd2')?.value,m=[...(document.getElementById('gm2').selectedOptions||[])].map(o=>o.value);const gs=DB.groups();gs.push({id:uid(),name:n,year:y||null,description:d,createdBy:CU.id,members:[CU.id,...m]});DB.sg(gs);closeM();AGid=null;rGroups();toast('Group created!','success');}
-function mgGroup(gid){
-  const g=DB.groups().find(x=>x.id===gid);if(!g)return;
-  const avail=DB.users().filter(u=>u.role==='student'&&u.status==='approved'&&!(g.members||[]).includes(u.id));
-  openM(`<div class="mh"><div class="mt">⚙️ ${esc(g.name)}</div><button class="mx" onclick="closeM()">✕</button></div><div style="max-height:190px;overflow-y:auto;margin-bottom:11px">${(g.members||[]).filter(m=>m!==CU.id).map(mid=>{const u=gU(mid);return u?`<div style="display:flex;align-items:center;gap:7px;padding:6px 0;border-bottom:1px solid var(--bdr)">${avEl(u,24)}<span style="flex:1;font-size:.82rem">${esc(u.name)}</span><button class="btn br bxs" onclick="rmGM('${gid}','${mid}')">✕</button></div>`:''}).join('')}</div><div class="fg"><label>Add Member</label><div style="display:flex;gap:6px"><select class="inp" id="gadd">${avail.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button class="btn bp bsm" onclick="addGM('${gid}')">Add</button></div></div><hr class="sdiv"><button class="btn br bsm" onclick="delG('${gid}')">🗑 Delete Group</button>`);
+async function saveG(){const n=document.getElementById('gn2')?.value.trim();if(!n){toast('Name required','error');return;}const y=document.getElementById('gy2')?.value,d=document.getElementById('gd2')?.value,m=[...(document.getElementById('gm2').selectedOptions||[])].map(o=>o.value);await fetch('/api/groups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,year:y||null,description:d,members:m})});closeM();AGid=null;rGroups();toast('Group created!','success');}
+async function mgGroup(gid){
+  const [grpRes,usRes]=await Promise.all([fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const g=(grpRes.ok?grpRes.groups:[]).find(x=>x.id===gid);if(!g)return;
+  const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
+  const avail=users.filter(u=>u.role==='student'&&u.status==='approved'&&!(g.members||[]).includes(u.id));
+  openM(`<div class="mh"><div class="mt">⚙️ ${esc(g.name)}</div><button class="mx" onclick="closeM()">✕</button></div><div style="max-height:190px;overflow-y:auto;margin-bottom:11px">${(g.members||[]).filter(m=>m!==CU.id).map(mid=>{const u=users.find(x=>x.id===mid);return u?`<div style="display:flex;align-items:center;gap:7px;padding:6px 0;border-bottom:1px solid var(--bdr)">${avEl(u,24)}<span style="flex:1;font-size:.82rem">${esc(u.name)}</span><button class="btn br bxs" onclick="rmGM('${gid}','${mid}')">✕</button></div>`:''}).join('')}</div><div class="fg"><label>Add Member</label><div style="display:flex;gap:6px"><select class="inp" id="gadd">${avail.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button class="btn bp bsm" onclick="addGM('${gid}')">Add</button></div></div><hr class="sdiv"><button class="btn br bsm" onclick="delG('${gid}')">🗑 Delete Group</button>`);
 }
-function addGM(gid){const u2=document.getElementById('gadd')?.value;if(!u2)return;const gs=DB.groups();const g=gs.find(x=>x.id===gid);if(g&&!g.members.includes(u2)){g.members.push(u2);DB.sg(gs);closeM();rGroups();toast('Added','success');}}
-function rmGM(gid,u2){const gs=DB.groups();const g=gs.find(x=>x.id===gid);if(g){g.members=g.members.filter(m=>m!==u2);DB.sg(gs);closeM();rGroups();}}
-function delG(gid){if(!confirm('Delete?'))return;DB.sg(DB.groups().filter(g=>g.id!==gid));AGid=null;closeM();rGroups();}
+async function addGM(gid){const u2=document.getElementById('gadd')?.value;if(!u2)return;await fetch(`/api/groups/${gid}/members`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:u2})});closeM();rGroups();toast('Added','success');}
+async function rmGM(gid,u2){await fetch(`/api/groups/${gid}/members/${u2}`,{method:'DELETE'});closeM();rGroups();}
+async function delG(gid){if(!confirm('Delete?'))return;await fetch(`/api/groups/${gid}`,{method:'DELETE'});AGid=null;closeM();rGroups();}
 
 /* ═══════════════════════════════════════
    FRIENDS / MESSAGES
 ═══════════════════════════════════════ */
-function rFriends(){
+async function rFriends(){
   const p=document.getElementById('panel-friends');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const friends=DB.friends();const acc=friends.filter(f=>f.status==='accepted'&&(f.fromId===CU.id||f.toId===CU.id));const pend=friends.filter(f=>f.status==='pending'&&f.toId===CU.id);
-  const list=isTA?DB.users().filter(u=>u.status==='approved'&&u.id!==CU.id):acc.map(f=>{const oid=f.fromId===CU.id?f.toId:f.fromId;return gU(oid);}).filter(Boolean);
+  const [frRes,usRes,msgRes]=await Promise.all([
+    fetch('/api/friends').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false})),
+    AFid?fetch(`/api/messages/dm/${AFid}`).then(x=>x.json()).catch(()=>({ok:false})):Promise.resolve({ok:false})
+  ]);
+  const friends=frRes.ok?frRes.friends:[];
+  const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
+  window._dmMsgs=msgRes.ok?msgRes.messages:[];
+  const acc=friends.filter(f=>f.status==='accepted'&&(f.from_id===CU.id||f.to_id===CU.id));
+  const pend=friends.filter(f=>f.status==='pending'&&f.to_id===CU.id);
+  const list=isTA?users.filter(u=>u.status==='approved'&&u.id!==CU.id):acc.map(f=>{const oid=f.from_id===CU.id?f.to_id:f.from_id;return users.find(u=>u.id===oid);}).filter(Boolean);
   p.innerHTML=`<div class="ph"><div class="ptt">${isTA?'All Messages':'Friends &amp; Messages'}</div></div>
     <div style="display:flex;gap:7px;margin-bottom:13px;flex-wrap:wrap">${!isTA?`<button class="btn bp" onclick="showAddFr()">+ Add Friend</button>`:''} ${pend.length&&!isTA?`<button class="btn bs" onclick="showFrReqs()">📬 Requests <span class="bc">${pend.length}</span></button>`:''}</div>
     <div class="cl cl2">
       <div class="clp"><div class="cls"><input class="inp" id="frs" placeholder="🔍 Search…" style="font-size:.81rem" oninput="this.parentElement.parentElement.querySelectorAll('.ci').forEach(e=>e.style.display=e.textContent.toLowerCase().includes(this.value.toLowerCase())?'flex':'none')"></div>
         <div id="frlist">${list.map(u=>`<div class="ci ${AFid===u.id?'on':''}" onclick="AFid='${u.id}';rFriends()">${avEl(u,34)}<div class="cii"><div class="cin">${esc(u.name)}</div><div class="cis">${u.role}${u.year?' · '+u.year:''}</div></div></div>`).join('')||'<div style="padding:14px;text-align:center;color:var(--txm);font-size:.81rem">No contacts</div>'}</div>
       </div>
-      <div class="cp" id="dmcp">${AFid?buildDM(AFid):`<div class="ce"><div class="ei">💬</div>Select someone to chat</div>`}</div>
+      <div class="cp" id="dmcp">${AFid?buildDM(AFid,users):`<div class="ce"><div class="ei">💬</div>Select someone to chat</div>`}</div>
     </div>`;
+  if(AFid)setTimeout(()=>{const el=document.getElementById('dmsg');if(el)el.scrollTop=el.scrollHeight;},60);
 }
-function buildDM(u2){
-  const other=gU(u2);if(!other)return '<div class="ce">Not found</div>';
-  const msgs=DB.messages().filter(m=>m.type==='dm'&&((m.fromId===CU.id&&m.toId===u2)||(m.fromId===u2&&m.toId===CU.id))).sort((a,b)=>a.ts-b.ts);
+function buildDM(u2,users){
+  const other=(users||window._cachedUsers||[]).find(u=>u.id===u2);if(!other)return '<div class="ce">Not found</div>';
+  const msgs=(window._dmMsgs||[]).sort((a,b)=>a.ts-b.ts);
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const mh=msgs.map(m=>{const own=m.fromId===CU.id;return `<div class="mb2 ${own?'own':'oth'}"><div class="bub ${m.ct==='note'?'bubn':''}">${esc(m.content)}</div><div class="bm">${fmtTime(m.ts)}${isTA&&!own?` · <button class="btn bgh bxs" style="font-size:.62rem;padding:1px 4px" onclick="delDM('${m.id}')">del</button>`:''}</div></div>`;}).join('');
+  const mh=msgs.map(m=>{const own=(m.from_id||m.fromId)===CU.id;return `<div class="mb2 ${own?'own':'oth'}"><div class="bub ${m.content_type==='note'||m.ct==='note'?'bubn':''}">${esc(m.content)}</div><div class="bm">${fmtTime(m.ts)}${isTA&&!own?` · <button class="btn bgh bxs" style="font-size:.62rem;padding:1px 4px" onclick="delDM('${m.id}')">del</button>`:''}</div></div>`;}).join('');
   return `<div class="ch2">${avEl(other,32)}<div style="margin-left:6px"><div style="font-weight:700;font-size:.87rem">${esc(other.name)}</div><div style="font-size:.71rem;color:var(--txm)">${other.role}</div></div></div>
     <div class="cm" id="dmsg">${mh||'<div class="ce" style="padding:30px"><div class="ei">👋</div>Start a conversation!</div>'}</div>
     <div class="cia">${isTA?`<button class="bi" onclick="sendDMNote('${u2}')" title="Note">📝</button>`:''}<input class="inp" id="dmi" placeholder="Message…" onkeydown="if(event.key==='Enter')sendDM('${u2}')"><button class="btn bp bsm" onclick="sendDM('${u2}')">Send</button></div>`;
 }
-function sendDM(u2){const inp=document.getElementById('dmi');const c=inp?.value.trim();if(!c)return;const m=DB.messages();m.push({id:uid(),type:'dm',fromId:CU.id,toId:u2,content:c,ct:'text',ts:now()});DB.sm(m);inp.value='';rFriends();setTimeout(()=>{const el=document.getElementById('dmsg');if(el)el.scrollTop=el.scrollHeight;},50);}
-function sendDMNote(u2){const n=prompt('Note:');if(!n)return;const m=DB.messages();m.push({id:uid(),type:'dm',fromId:CU.id,toId:u2,content:n,ct:'note',ts:now()});DB.sm(m);rFriends();}
-function delDM(id){if(CU.role!=='teacher'&&CU.role!=='admin')return;DB.sm(DB.messages().filter(m=>m.id!==id));rFriends();}
-function showAddFr(){
-  const ex=DB.friends().flatMap(f=>[f.fromId,f.toId]);
-  const av=DB.users().filter(u=>u.status==='approved'&&u.id!==CU.id&&!ex.includes(u.id));
+async function sendDM(u2){const inp=document.getElementById('dmi');const c=inp?.value.trim();if(!c)return;await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'dm',toId:u2,content:c,contentType:'text'})});inp.value='';rFriends();}
+async function sendDMNote(u2){const n=prompt('Note:');if(!n)return;await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'dm',toId:u2,content:n,contentType:'note'})});rFriends();}
+async function delDM(id){if(CU.role!=='teacher'&&CU.role!=='admin')return;await fetch(`/api/messages/${id}`,{method:'DELETE'});rFriends();}
+async function showAddFr(){
+  const [frRes,usRes]=await Promise.all([fetch('/api/friends').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const friends=frRes.ok?frRes.friends:[];const users=usRes.ok?usRes.users:[];
+  const ex=friends.flatMap(f=>[f.from_id,f.to_id]);
+  const av=users.filter(u=>u.status==='approved'&&u.id!==CU.id&&!ex.includes(u.id));
   openM(`<div class="mh"><div class="mt">+ Add Friend</div><button class="mx" onclick="closeM()">✕</button></div><input class="inp" placeholder="🔍 Search…" oninput="this.nextSibling.querySelectorAll('.ci').forEach(e=>e.style.display=e.textContent.toLowerCase().includes(this.value.toLowerCase())?'flex':'none')" style="margin-bottom:9px"><div class="scroll-box">${av.map(u=>`<div class="ci">${avEl(u,34)}<div class="cii"><div class="cin">${esc(u.name)}</div><div class="cis">${esc(u.email)}</div></div><button class="btn bp bxs" onclick="sendFR('${u.id}')">Add</button></div>`).join('')||'<p style="color:var(--txm);padding:11px">No users available</p>'}</div>`);
 }
-function sendFR(toId){const f=DB.friends();if(f.find(x=>(x.fromId===CU.id&&x.toId===toId)||(x.toId===CU.id&&x.fromId===toId))){toast('Already connected','error');return;}f.push({id:uid(),fromId:CU.id,toId,status:'pending'});DB.sf(f);closeM();pushNotif(toId,`${CU.name} sent a friend request`,'👤','info');toast('Request sent!','success');}
-function showFrReqs(){
-  const rs=DB.friends().filter(f=>f.status==='pending'&&f.toId===CU.id);
-  openM(`<div class="mh"><div class="mt">📬 Friend Requests</div><button class="mx" onclick="closeM()">✕</button></div>${rs.map(f=>{const u=gU(f.fromId);return u?`<div class="pr">${avEl(u,34)}<div style="flex:1"><div style="font-weight:600">${esc(u.name)}</div></div><div class="btns"><button class="btn bp bsm" onclick="acFR('${f.id}')">Accept</button><button class="btn br bsm" onclick="rjFR('${f.id}')">Reject</button></div></div>`:''}).join('')||'<p style="color:var(--txm)">No requests</p>'}`);
+async function sendFR(toId){await fetch('/api/friends/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({toId})});closeM();rFriends();toast('Request sent!','success');}
+async function showFrReqs(){
+  const [frRes,usRes]=await Promise.all([fetch('/api/friends').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const friends=frRes.ok?frRes.friends:[];const users=usRes.ok?usRes.users:[];
+  const rs=friends.filter(f=>f.status==='pending'&&f.to_id===CU.id);
+  openM(`<div class="mh"><div class="mt">📬 Friend Requests</div><button class="mx" onclick="closeM()">✕</button></div>${rs.map(f=>{const u=users.find(x=>x.id===f.from_id);return u?`<div class="pr">${avEl(u,34)}<div style="flex:1"><div style="font-weight:600">${esc(u.name)}</div></div><div class="btns"><button class="btn bp bsm" onclick="acFR('${f.id}')">Accept</button><button class="btn br bsm" onclick="rjFR('${f.id}')">Reject</button></div></div>`:''}).join('')||'<p style="color:var(--txm)">No requests</p>'}`);
 }
-function acFR(id){const f=DB.friends();const x=f.find(y=>y.id===id);if(x){x.status='accepted';DB.sf(f);closeM();rFriends();pushNotif(x.fromId,`${CU.name} accepted your friend request`,'✓','success');toast('Accepted!','success');}}
-function rjFR(id){DB.sf(DB.friends().filter(f=>f.id!==id));closeM();toast('Rejected','info');}
+async function acFR(id){await fetch(`/api/friends/${id}/accept`,{method:'PUT'});closeM();rFriends();toast('Accepted!','success');}
+async function rjFR(id){await fetch(`/api/friends/${id}`,{method:'DELETE'});closeM();toast('Rejected','info');}
 
 /* ═══════════════════════════════════════
    ASSIGNMENTS + GRADING
 ═══════════════════════════════════════ */
-function rAssign(){
+async function rAssign(){
   const p=document.getElementById('panel-assignments');
   const isTA=CU.role==='teacher'||CU.role==='admin';
-  const all=DB.assignments();
-  const mine=isTA?all:all.filter(a=>{if(a.assignedTo?.includes(CU.id))return true;if(a.assignedYear===CU.year)return true;const g=DB.groups().find(x=>x.id===a.assignedGroup);return g&&g.members?.includes(CU.id);});
+  p.innerHTML=`<div class="ph"><div class="ptt">Assignments</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [asgRes,grpRes]=await Promise.all([fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const all=asgRes.ok?asgRes.assignments:[];const allG=grpRes.ok?grpRes.groups:[];
+  const mine=isTA?all:all.filter(a=>{if((a.assigned_to||a.assignedTo||[]).includes(CU.id))return true;if((a.assigned_year||a.assignedYear)===CU.year)return true;const g=allG.find(x=>x.id===(a.assigned_group||a.assignedGroup));return g&&(g.members||[]).includes(CU.id);});
   p.innerHTML=`<div class="ph"><div class="ptt">Assignments</div></div>${isTA?`<button class="btn bp" style="margin-bottom:13px" onclick="showCreateA()">+ Create Assignment</button>`:''} ${mine.length?mine.map(a=>buildACard(a,isTA)).join(''):`<div class="es"><div class="ei">📋</div><p>No assignments yet</p></div>`}`;
 }
 function buildACard(a,isTA){
-  const du=a.dueDate?daysUntil(a.dueDate):null;
+  const du=a.due_date||a.dueDate?daysUntil(a.due_date||a.dueDate):null;
   const dc=du===null?'':du<0?'dl':du<=3?'dw':'dok';const dl=du===null?'No due date':du<0?`Overdue ${Math.abs(du)}d`:du===0?'Due today':`Due in ${du}d`;
-  const sub=(a.submissions||[]).find(s=>s.studentId===CU.id);const myG=sub?.grade;
-  const ung=(a.submissions||[]).filter(s=>!s.grade).length;
+  const sub=(a.submissions||[]).find(s=>s.student_id===CU.id||s.studentId===CU.id);const myG=sub?.grade_letter||sub?.grade;
+  const ung=(a.submissions||[]).filter(s=>!s.grade_letter&&!s.grade).length;
   return `<div class="ac2"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px"><div class="at2">${esc(a.title)}</div><span class="${dc}">${dl}</span></div>
-    <div class="am">${a.dueDate?`<span>📅 ${fmtDate(a.dueDate)}</span>`:''} ${a.assignedYear?`<span>🎓 ${a.assignedYear} Year</span>`:''} ${isTA?`<span>📤 ${(a.submissions||[]).length} submitted${ung>0?` · <span style="color:var(--red)">${ung} ungraded</span>`:''}</span>`:''}</div>
+    <div class="am">${(a.due_date||a.dueDate)?`<span>📅 ${fmtDate(a.due_date||a.dueDate)}</span>`:''} ${(a.assigned_year||a.assignedYear)?`<span>🎓 ${a.assigned_year||a.assignedYear} Year</span>`:''} ${isTA?`<span>📤 ${(a.submissions||[]).length} submitted${ung>0?` · <span style="color:var(--red)">${ung} ungraded</span>`:''}</span>`:''}</div>
     ${a.description?`<div class="ad">${esc(a.description)}</div>`:''}
-    ${myG?`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px"><div class="gc g${myG.grade}" style="width:36px;height:36px;font-size:.88rem">${myG.grade}</div><div><div style="font-weight:700">${myG.score}/${a.maxScore||100}</div>${myG.feedback?`<div style="font-size:.77rem;color:var(--txm)">${esc(myG.feedback)}</div>`:''}</div></div>`:''}
+    ${myG?`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px"><div class="gc g${myG}" style="width:36px;height:36px;font-size:.88rem">${myG}</div><div><div style="font-weight:700">${sub.grade_score||sub.score}/${a.max_score||a.maxScore||100}</div>${sub.feedback?`<div style="font-size:.77rem;color:var(--txm)">${esc(sub.feedback)}</div>`:''}</div></div>`:''}
     <div style="display:flex;gap:6px;flex-wrap:wrap">${!isTA&&!sub?`<button class="btn bp bsm" onclick="showSubmitA('${a.id}')">Submit</button>`:''}${!isTA&&sub&&!myG?`<span class="bdg bb2">✓ Submitted · Awaiting grade</span>`:''} ${isTA?`<button class="btn bs bsm" onclick="showGradeP('${a.id}')">Grade (${(a.submissions||[]).length})</button><button class="btn br bsm" onclick="delA('${a.id}')">Delete</button>`:''}</div></div>`;
 }
-function showCreateA(){
-  const studs=DB.users().filter(u=>u.role==='student'&&u.status==='approved'),gs=DB.groups();
+async function showCreateA(){
+  const [usRes,grpRes]=await Promise.all([fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const studs=usRes.ok?usRes.users.filter(u=>u.role==='student'&&u.status==='approved'):[];
+  const gs=grpRes.ok?grpRes.groups:[];
   openM(`<div class="mh"><div class="mt">📋 New Assignment</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Title</label><input class="inp" id="at3" placeholder="Assignment title"></div><div class="fg"><label>Description</label><textarea class="inp" id="ad2" rows="3" placeholder="Instructions…"></textarea></div><div class="fr"><div class="fg"><label>Due Date</label><input class="inp" type="date" id="adu"></div><div class="fg"><label>Max Score</label><input class="inp" type="number" id="amx" value="100" min="1"></div></div><div class="fr"><div class="fg"><label>Assign to Year</label><select class="inp" id="ayr"><option value="">No filter</option><option value="1st">1st</option><option value="2nd">2nd</option><option value="3rd">3rd</option></select></div><div class="fg"><label>Assign to Group</label><select class="inp" id="agr"><option value="">None</option>${gs.map(g=>`<option value="${g.id}">${esc(g.name)}</option>`).join('')}</select></div></div><div class="fg"><label>Specific Students</label><select class="inp" id="ast" multiple style="height:90px">${studs.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="saveA()">Create</button></div>`);
 }
-function saveA(){
+async function saveA(){
   const t=document.getElementById('at3')?.value.trim();if(!t){toast('Title required','error');return;}
   const d=document.getElementById('ad2')?.value,du=document.getElementById('adu')?.value,mx=+document.getElementById('amx')?.value||100;
   const yr=document.getElementById('ayr')?.value,gr=document.getElementById('agr')?.value;
   const st=[...(document.getElementById('ast').selectedOptions||[])].map(o=>o.value);
-  const a={id:uid(),teacherId:CU.id,title:t,description:d,dueDate:du||null,maxScore:mx,assignedTo:st,assignedGroup:gr||null,assignedYear:yr||null,submissions:[],createdAt:now()};
-  const arr=DB.assignments();arr.push(a);DB.sa(arr);
-  const tgts=new Set(st);if(yr)DB.users().filter(u=>u.role==='student'&&u.year===yr).forEach(u=>tgts.add(u.id));
-  if(gr){const g=DB.groups().find(x=>x.id===gr);if(g)(g.members||[]).forEach(m=>tgts.add(m));}
-  tgts.forEach(tid=>pushNotif(tid,`New assignment: ${t}`,'📋','info'));
+  await fetch('/api/assignments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,description:d,dueDate:du||null,maxScore:mx,assignedTo:st,assignedGroup:gr||null,assignedYear:yr||null})});
   closeM();rAssign();toast('Created!','success');logAct('ASSIGNMENT',t);
 }
 function showSubmitA(aid){openM(`<div class="mh"><div class="mt">📤 Submit Assignment</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Your Submission</label><textarea class="inp" id="sub2" rows="6" placeholder="Write your answer here…"></textarea></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="doSubmit('${aid}')">Submit</button></div>`);}
-function doSubmit(aid){const c=document.getElementById('sub2')?.value.trim();if(!c){toast('Write something','error');return;}const arr=DB.assignments();const a=arr.find(x=>x.id===aid);if(!a)return;if(!a.submissions)a.submissions=[];a.submissions=a.submissions.filter(s=>s.studentId!==CU.id);a.submissions.push({studentId:CU.id,content:c,submittedAt:now()});DB.sa(arr);closeM();rAssign();pushNotif(a.teacherId,`${CU.name} submitted: ${a.title}`,'📤','info');toast('Submitted!','success');}
-function showGradeP(aid){
-  const a=DB.assignments().find(x=>x.id===aid);if(!a)return;
-  const sh=(a.submissions||[]).map(s=>{const u=gU(s.studentId);return `<div class="csm" style="margin-bottom:9px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">${avEl(u,26)}<strong>${esc(u?.name||'?')}</strong><span style="margin-left:auto;font-size:.73rem;color:var(--txm)">${fmtDate(s.submittedAt)}</span></div><div style="font-size:.83rem;color:var(--txm);margin-bottom:9px;white-space:pre-wrap">${esc(s.content)}</div>${s.grade?`<div class="bdg bgr">Graded: ${s.grade.score}/${a.maxScore||100} (${s.grade.grade})</div>`:`<div style="display:flex;gap:6px;flex-wrap:wrap"><input class="inp" id="gs${s.studentId}" type="number" placeholder="Score (0-${a.maxScore||100})" max="${a.maxScore||100}" min="0" style="width:115px"><input class="inp" id="gf${s.studentId}" placeholder="Feedback…"><button class="btn bp bsm" onclick="doGrade('${aid}','${s.studentId}',${a.maxScore||100})">Grade</button></div>`}</div>`;}).join('');
+async function doSubmit(aid){const c=document.getElementById('sub2')?.value.trim();if(!c){toast('Write something','error');return;}await fetch(`/api/assignments/${aid}/submit`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})});closeM();rAssign();toast('Submitted!','success');}
+async function showGradeP(aid){
+  const r=await fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false}));
+  const a=(r.ok?r.assignments:[]).find(x=>x.id===aid);if(!a)return;
+  const users=window._cachedUsers||(await fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false,users:[]}))).users||[];
+  const sh=(a.submissions||[]).map(s=>{const u=users.find(x=>x.id===(s.student_id||s.studentId));return `<div class="csm" style="margin-bottom:9px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">${avEl(u,26)}<strong>${esc(u?.name||'?')}</strong><span style="margin-left:auto;font-size:.73rem;color:var(--txm)">${fmtDate(s.submitted_at||s.submittedAt)}</span></div><div style="font-size:.83rem;color:var(--txm);margin-bottom:9px;white-space:pre-wrap">${esc(s.content)}</div>${s.grade_letter?`<div class="bdg bgr">Graded: ${s.grade_score}/${a.max_score||a.maxScore||100} (${s.grade_letter})</div>`:`<div style="display:flex;gap:6px;flex-wrap:wrap"><input class="inp" id="gs${s.student_id||s.studentId}" type="number" placeholder="Score (0-${a.max_score||a.maxScore||100})" max="${a.max_score||a.maxScore||100}" min="0" style="width:115px"><input class="inp" id="gf${s.student_id||s.studentId}" placeholder="Feedback…"><button class="btn bp bsm" onclick="doGrade('${aid}','${s.student_id||s.studentId}',${a.max_score||a.maxScore||100})">Grade</button></div>`}</div>`;}).join('');
   openM(`<div class="mh"><div class="mt">📋 Grade: ${esc(a.title)}</div><button class="mx" onclick="closeM(2)">✕</button></div>${sh||'<p style="color:var(--txm)">No submissions</p>'}`,2);
 }
-function doGrade(aid,sid,mx){
+async function doGrade(aid,sid,mx){
   const sc=parseInt(document.getElementById('gs'+sid)?.value),fb=document.getElementById('gf'+sid)?.value||'';
   if(isNaN(sc)||sc<0||sc>mx){toast(`Score 0–${mx}`,'error');return;}
-  const pct=Math.round(sc/mx*100);const g=pct>=90?'A':pct>=80?'B':pct>=70?'C':pct>=60?'D':'F';
-  const arr=DB.assignments();const a=arr.find(x=>x.id===aid);if(!a)return;
-  const sub=a.submissions.find(s=>s.studentId===sid);if(sub){sub.grade={score:sc,maxScore:mx,grade:g,feedback:fb,gradedBy:CU.id,gradedAt:now()};}DB.sa(arr);
-  const grades=DB.grades();grades.push({id:uid(),studentId:sid,type:'assignment',assignmentId:aid,subject:a.title,score:pct,grade:g,ts:now()});DB.sgrade(grades);
-  pushNotif(sid,`Assignment "${a.title}" graded: ${sc}/${mx} (${g})`,'📊','info');
+  await fetch(`/api/assignments/${aid}/grade/${sid}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({score:sc,feedback:fb,maxScore:mx})});
   closeM(2);rAssign();toast('Graded!','success');
 }
-function delA(id){if(!confirm('Delete?'))return;DB.sa(DB.assignments().filter(a=>a.id!==id));rAssign();}
+async function delA(id){if(!confirm('Delete?'))return;await fetch(`/api/assignments/${id}`,{method:'DELETE'});rAssign();}
 
 /* ═══════════════════════════════════════
    APPROVALS
@@ -1361,15 +1440,14 @@ function delA(id){if(!confirm('Delete?'))return;DB.sa(DB.assignments().filter(a=
 async function rApprovals(){
   const p=document.getElementById('panel-approvals');
   const isAdmin=CU.role==='admin';
-  p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div><div style="color:var(--txm);font-size:.84rem">Loading...</div>`;
+  p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div><div style="color:var(--txm);font-size:.84rem">Loading…</div>`;
   try{
-    // Fetch pending users from server
     const [apRes,usRes]=await Promise.all([
       fetch('/api/approvals').then(r=>r.json()),
       fetch('/api/users').then(r=>r.json())
     ]);
     const approvals=apRes.ok?apRes.approvals:[];
-    const allUsers=usRes.ok?usRes.users:[];
+    const allUsers=usRes.ok?usRes.users:[];window._cachedUsers=allUsers;
     const pend=isAdmin?approvals:approvals.filter(pa=>pa.role==='student');
     p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div>
       ${pend.length?pend.map(pa=>{
@@ -1381,7 +1459,7 @@ async function rApprovals(){
   }catch(e){p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div><div style="color:var(--red)">Failed to load approvals</div>`;}
 }
 function rTY(allUsers){
-  const teachers=(allUsers||[]).filter(u=>u.role==='teacher'&&u.status==='approved');
+  const teachers=(allUsers||window._cachedUsers||[]).filter(u=>u.role==='teacher'&&u.status==='approved');
   const ty=DB.g('teacherYears')||[];
   if(!teachers.length)return '<p style="color:var(--txm);font-size:.82rem">No approved teachers</p>';
   return teachers.map(t=>{const asgn=ty.filter(x=>x.tid===t.id).map(x=>x.yr);return `<div style="display:flex;align-items:center;gap:9px;padding:8px 0;border-bottom:1px solid var(--bdr)">${avEl(t,28)}<span style="flex:1;font-weight:600;font-size:.84rem">${esc(t.name)}</span>${['1st','2nd','3rd'].map(yr=>`<label style="display:flex;align-items:center;gap:3px;font-size:.77rem;cursor:pointer"><input type="checkbox" ${asgn.includes(yr)?'checked':''} onchange="togTY('${t.id}','${yr}',this.checked)"> ${yr}</label>`).join('')}</div>`;}).join('');
@@ -1390,14 +1468,14 @@ async function apprU(pid){
   try{
     const r=await fetch(`/api/approvals/${pid}/approve`,{method:'POST'}).then(x=>x.json());
     if(!r.ok)return toast('Approval failed','error');
-    buildNav();rApprovals();toast('Approved!','success');
+    updNDot();rApprovals();toast('Approved!','success');
   }catch(e){toast('Error approving','error');}
 }
 async function rejU(pid){
   try{
-    const r=await fetch(`/api/approvals/${pid}/reject`,{method:'POST'}).then(x=>x.json());
+    const r=await fetch(`/api/approvals/${pid}/reject`,{method:'DELETE'}).then(x=>x.json());
     if(!r.ok)return toast('Rejection failed','error');
-    buildNav();rApprovals();toast('Rejected','info');
+    updNDot();rApprovals();toast('Rejected','info');
   }catch(e){toast('Error rejecting','error');}
 }
 function togTY(tid,yr,on){const ty=DB.g('teacherYears')||[];const f=ty.filter(t=>!(t.tid===tid&&t.yr===yr));if(on)f.push({tid,yr});DB.s('teacherYears',f);toast('Updated','success');}
@@ -1405,145 +1483,142 @@ function togTY(tid,yr,on){const ty=DB.g('teacherYears')||[];const f=ty.filter(t=
 /* ═══════════════════════════════════════
    NOTIFICATIONS
 ═══════════════════════════════════════ */
-function rNotifs(){
+async function rNotifs(){
   const p=document.getElementById('panel-notifications');
-  const notifs=DB.notifs().filter(n=>n.userId===CU.id);const unr=notifs.filter(n=>!n.read).length;
-  if(unr>0){const all=DB.notifs();all.filter(n=>n.userId===CU.id).forEach(n=>n.read=true);DB.sn2(all);updNDot();buildNav();}
+  const r=await fetch('/api/notifications').then(x=>x.json()).catch(()=>({ok:false}));
+  const notifs=r.ok?r.notifications:[];
+  const unr=notifs.filter(n=>!n.is_read&&!n.read).length;
+  if(unr>0)fetch('/api/notifications',{method:'PUT'}).catch(()=>{});
+  updNDot();buildNav();
   p.innerHTML=`<div class="ph"><div class="ptt">Notifications</div><div class="ps">${notifs.length} total · ${unr} unread</div></div><div style="display:flex;justify-content:flex-end;margin-bottom:9px"><button class="btn bgh bsm" onclick="clearNotifs()">Clear All</button></div>
-    ${notifs.length?`<div class="card" style="padding:0;overflow:hidden">${notifs.slice(0,60).map(n=>`<div class="ci" style="display:flex;cursor:default;${n.read?'':'background:var(--gold-d)'}"><div style="width:32px;height:32px;border-radius:50%;background:var(--card2);display:flex;align-items:center;justify-content:center;flex-shrink:0">${n.icon||'🔔'}</div><div style="flex:1;margin-left:9px"><div style="font-size:.83rem;font-weight:500;line-height:1.4">${esc(n.text)}</div><div style="font-size:.71rem;color:var(--txm);margin-top:1px">${fmtDate(n.ts)} · ${fmtTime(n.ts)}</div></div></div>`).join('')}</div>`:`<div class="es"><div class="ei">🔔</div><p>All caught up!</p></div>`}`;
+    ${notifs.length?`<div class="card" style="padding:0;overflow:hidden">${notifs.slice(0,60).map(n=>`<div class="ci" style="display:flex;cursor:default;${n.is_read||n.read?'':'background:var(--gold-d)'}"><div style="width:32px;height:32px;border-radius:50%;background:var(--card2);display:flex;align-items:center;justify-content:center;flex-shrink:0">${n.icon||'🔔'}</div><div style="flex:1;margin-left:9px"><div style="font-size:.83rem;font-weight:500;line-height:1.4">${esc(n.text)}</div><div style="font-size:.71rem;color:var(--txm);margin-top:1px">${fmtDate(n.ts)} · ${fmtTime(n.ts)}</div></div></div>`).join('')}</div>`:`<div class="es"><div class="ei">🔔</div><p>All caught up!</p></div>`}`;
 }
-function clearNotifs(){DB.sn2(DB.notifs().filter(n=>n.userId!==CU.id));rNotifs();updNDot();}
+async function clearNotifs(){await fetch('/api/notifications',{method:'DELETE'}).catch(()=>{});rNotifs();updNDot();}
 
 /* ═══════════════════════════════════════
    PARENT PORTAL
 ═══════════════════════════════════════ */
-function rParent(){
+async function rParent(){
   const p=document.getElementById('panel-parent');
-  const links=DB.parentLinks().filter(l=>l.parentId===CU.id);
-  const children=links.map(l=>gU(l.studentId)).filter(Boolean);
+  const [plRes,usRes]=await Promise.all([fetch('/api/parent-links').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const links=plRes.ok?plRes.links:[];const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
+  const children=links.map(l=>users.find(u=>u.id===(l.student_id||l.studentId))).filter(Boolean);
   const ac=window._achild||children[0]?.id;
   p.innerHTML=`<div class="ph"><div class="ptt">Parent Portal</div><div class="ps">Monitor your children's academic progress</div></div>
     <button class="btn bp" style="margin-bottom:14px" onclick="linkChild()">+ Link Child</button>
-    ${children.length?`<div style="display:flex;gap:7px;margin-bottom:14px;flex-wrap:wrap">${children.map(c=>`<button class="btn ${ac===c.id?'bp':'bs'}" onclick="window._achild='${c.id}';rParent()">${esc(c.name)}</button>`).join('')}</div>${ac?buildChildDash(ac):''}`:
+    ${children.length?`<div style="display:flex;gap:7px;margin-bottom:14px;flex-wrap:wrap">${children.map(c=>`<button class="btn ${ac===c.id?'bp':'bs'}" onclick="window._achild='${c.id}';rParent()">${esc(c.name)}</button>`).join('')}</div>${ac?buildChildDash(ac,users):''}`:
     `<div class="es"><div class="ei">👶</div><p>No children linked yet.<br>Click "Link Child" to get started.</p></div>`}`;
 }
-function buildChildDash(cid){
-  const c=gU(cid);if(!c)return '';
-  const grades=DB.grades().filter(g=>g.studentId===cid);
-  const asgns=DB.assignments().filter(a=>a.assignedTo?.includes(cid)||a.assignedYear===c.year);
-  const pend=asgns.filter(a=>!(a.submissions||[]).find(s=>s.studentId===cid));
+async function buildChildDash(cid,users){
+  const [grRes,asgRes,clsRes]=await Promise.all([fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/classrooms').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const c=(users||[]).find(u=>u.id===cid);if(!c)return '';
+  const grades=(grRes.ok?grRes.grades:[]).filter(g=>g.student_id===cid||g.studentId===cid);
+  const asgns=(asgRes.ok?asgRes.assignments:[]).filter(a=>(a.assigned_to||a.assignedTo||[]).includes(cid)||(a.assigned_year||a.assignedYear)===c.year);
+  const pend=asgns.filter(a=>!(a.submissions||[]).find(s=>s.student_id===cid||s.studentId===cid));
   const qg=grades.filter(g=>g.type==='quiz');
   const avg=qg.length?Math.round(qg.reduce((a,g)=>a+g.score,0)/qg.length):null;
-  const crs=DB.classrooms().filter(cr=>(cr.students||[]).includes(cid));
-  return `<div class="card" style="margin-bottom:13px"><div style="display:flex;align-items:center;gap:11px;margin-bottom:14px">${avEl(c,46)}<div><div style="font-weight:700;font-size:.97rem">${esc(c.name)}</div><div style="font-size:.79rem;color:var(--txm)">${esc(c.studyingAs||'Student')} · ${c.year||''} Year</div></div></div>
+  const crs=(clsRes.ok?clsRes.classrooms:[]).filter(cr=>(cr.students||[]).includes(cid));
+  const p=document.getElementById('panel-parent');
+  const existing=p.querySelector('.child-dash');
+  const dashEl=document.createElement('div');dashEl.className='child-dash';
+  dashEl.innerHTML=`<div class="card" style="margin-bottom:13px"><div style="display:flex;align-items:center;gap:11px;margin-bottom:14px">${avEl(c,46)}<div><div style="font-weight:700;font-size:.97rem">${esc(c.name)}</div><div style="font-size:.79rem;color:var(--txm)">${esc(c.studying_as||c.studyingAs||'Student')} · ${c.year||''} Year</div></div></div>
     <div class="sr" style="margin-bottom:0"><div class="sb2"><div class="sn" style="color:var(--grn)">${avg!==null?avg+'%':'—'}</div><div class="sl2">Quiz Avg</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${pend.length}</div><div class="sl2">Pending</div></div><div class="sb2"><div class="sn" style="color:var(--blue)">${grades.length}</div><div class="sl2">Graded</div></div><div class="sb2"><div class="sn" style="color:var(--gold)">${crs.length}</div><div class="sl2">Classes</div></div></div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">
       <div class="card"><div class="ch"><div class="ct">📊 Recent Grades</div></div>${grades.slice(0,6).map(g=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--bdr);font-size:.81rem"><span>${esc(g.subject)}</span><span class="bdg ${g.score>=80?'bgr':g.score>=60?'bg':'bd'}">${g.score}%</span></div>`).join('')||'<p style="color:var(--txm);font-size:.81rem">No grades yet</p>'}</div>
-      <div class="card"><div class="ch"><div class="ct">📋 Assignments</div></div>${asgns.slice(0,6).map(a=>{const s=(a.submissions||[]).find(x=>x.studentId===cid);return `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--bdr);font-size:.81rem"><span>${esc(a.title)}</span><span class="bdg ${s?'bgr':'bd'}">${s?'Done':'Pending'}</span></div>`;}).join('')||'<p style="color:var(--txm);font-size:.81rem">No assignments</p>'}</div>
+      <div class="card"><div class="ch"><div class="ct">📋 Assignments</div></div>${asgns.slice(0,6).map(a=>{const s=(a.submissions||[]).find(x=>x.student_id===cid||x.studentId===cid);return `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--bdr);font-size:.81rem"><span>${esc(a.title)}</span><span class="bdg ${s?'bgr':'bd'}">${s?'Done':'Pending'}</span></div>`;}).join('')||'<p style="color:var(--txm);font-size:.81rem">No assignments</p>'}</div>
     </div>`;
+  if(existing)existing.replaceWith(dashEl);else p.appendChild(dashEl);
 }
-function linkChild(){
-  const studs=DB.users().filter(u=>u.role==='student'&&u.status==='approved');
-  openM(`<div class="mh"><div class="mt">Link Your Child</div><button class="mx" onclick="closeM()">✕</button></div><div class="ib"><span>ℹ️</span><span>Search for your child by name or email.</span></div><input class="inp" placeholder="🔍 Search…" oninput="this.nextSibling.querySelectorAll('.ci').forEach(e=>e.style.display=e.textContent.toLowerCase().includes(this.value.toLowerCase())?'flex':'none')" style="margin-bottom:9px"><div>${studs.filter(s=>!DB.parentLinks().find(l=>l.parentId===CU.id&&l.studentId===s.id)).map(s=>`<div class="ci">${avEl(s,32)}<div class="cii"><div class="cin">${esc(s.name)}</div><div class="cis">${esc(s.email)} · ${s.year||''}</div></div><button class="btn bp bxs" onclick="doLink('${s.id}')">Link</button></div>`).join('')||'<p style="color:var(--txm);padding:11px">No students found</p>'}</div>`);
+async function linkChild(){
+  const [plRes,usRes]=await Promise.all([fetch('/api/parent-links').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false}))]);
+  const links=plRes.ok?plRes.links:[];const users=usRes.ok?usRes.users:[];
+  const linked=links.map(l=>l.student_id||l.studentId);
+  const studs=users.filter(u=>u.role==='student'&&u.status==='approved'&&!linked.includes(u.id));
+  openM(`<div class="mh"><div class="mt">Link Your Child</div><button class="mx" onclick="closeM()">✕</button></div><div class="ib"><span>ℹ️</span><span>Search for your child by name or email.</span></div><input class="inp" placeholder="🔍 Search…" oninput="this.nextSibling.querySelectorAll('.ci').forEach(e=>e.style.display=e.textContent.toLowerCase().includes(this.value.toLowerCase())?'flex':'none')" style="margin-bottom:9px"><div>${studs.map(s=>`<div class="ci">${avEl(s,32)}<div class="cii"><div class="cin">${esc(s.name)}</div><div class="cis">${esc(s.email)} · ${s.year||''}</div></div><button class="btn bp bxs" onclick="doLink('${s.id}')">Link</button></div>`).join('')||'<p style="color:var(--txm);padding:11px">No students found</p>'}</div>`);
 }
-function doLink(sid){const l=DB.parentLinks();l.push({id:uid(),parentId:CU.id,studentId:sid,linkedAt:now()});DB.spl(l);closeM();rParent();toast('Child linked!','success');}
+async function doLink(sid){await fetch('/api/parent-links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({studentId:sid})});closeM();rParent();toast('Child linked!','success');}
 
 /* ═══════════════════════════════════════
    SECURITY
 ═══════════════════════════════════════ */
-function rSecurity(){
+async function rSecurity(){
   const p=document.getElementById('panel-security');
-  const isAdmin=CU.role==='admin';const log=DB.actLog();
+  const isAdmin=CU.role==='admin';
+  const logRes=isAdmin?await fetch('/api/activity-log').then(x=>x.json()).catch(()=>({ok:false})):{ok:false};
+  const log=logRes.ok?logRes.log:[];
   p.innerHTML=`<div class="ph"><div class="ptt">Security</div></div>
     <div class="card" style="margin-bottom:13px"><div class="admst">Account Security</div>
       <div class="sci"><div><div style="font-weight:600;font-size:.87rem">Two-Factor Authentication</div><div style="font-size:.77rem;color:var(--txm)">Add extra security to your account</div></div><div class="tgl ${CU.twoFA?'on':''}" onclick="togSec('twoFA')"></div></div>
       <div class="sci"><div><div style="font-weight:600;font-size:.87rem">Login Notifications</div><div style="font-size:.77rem;color:var(--txm)">Get notified of new logins</div></div><div class="tgl ${CU.loginNotif?'on':''}" onclick="togSec('loginNotif')"></div></div>
       <div class="sci"><div><div style="font-weight:600;font-size:.87rem">Change Password</div></div><button class="btn bs bsm" onclick="showChgPw()">Change</button></div>
     </div>
-    ${isAdmin?`<div class="card"><div class="admst">Platform Activity Log (Last 30)</div>${log.slice(0,30).map(l=>{const icons={LOGIN:'🟢',LOGOUT:'🔴',SCHEDULE:'📅',FORUM_POST:'💬',ANNOUNCEMENT:'📢',ASSIGNMENT:'📋',APPROVE:'✅'};return `<div class="alr"><div class="ali" style="background:var(--card2)">${icons[l.action]||'🔵'}</div><div style="flex:1"><div style="font-size:.81rem;font-weight:600">${esc(l.userName||'?')} <span style="color:var(--txm);font-weight:400">${l.action}</span>${l.detail?` "<span style="font-size:.78rem;color:var(--txm)">${esc(l.detail)}</span>"`:''}</div><div style="font-size:.71rem;color:var(--txm)">${fmtDate(l.ts)} · ${fmtTime(l.ts)} · ${l.role}</div></div></div>`;}).join('')||'<p style="color:var(--txm);font-size:.82rem">No activity recorded</p>'}<button class="btn br bsm" style="margin-top:9px" onclick="DB.sal([]);rSecurity()">Clear Log</button></div>`:''}`;
+    ${isAdmin?`<div class="card"><div class="admst">Platform Activity Log (Last 30)</div>${log.slice(0,30).map(l=>{const icons={LOGIN:'🟢',LOGOUT:'🔴',SCHEDULE:'📅',FORUM_POST:'💬',ANNOUNCEMENT:'📢',ASSIGNMENT:'📋',APPROVE:'✅'};return `<div class="alr"><div class="ali" style="background:var(--card2)">${icons[l.action]||'🔵'}</div><div style="flex:1"><div style="font-size:.81rem;font-weight:600">${esc(l.user_name||l.userName||'?')} <span style="color:var(--txm);font-weight:400">${l.action}</span>${l.detail?` "<span style="font-size:.78rem;color:var(--txm)">${esc(l.detail)}</span>"`:''}</div><div style="font-size:.71rem;color:var(--txm)">${fmtDate(l.ts)} · ${fmtTime(l.ts)} · ${l.role}</div></div></div>`;}).join('')||'<p style="color:var(--txm);font-size:.82rem">No activity recorded</p>'}</div>`:''}`;
 }
-function togSec(key){const users=DB.users();const u=users.find(x=>x.id===CU.id);if(u){u[key]=!u[key];CU=u;DB.su(users);rSecurity();toast('Updated','success');}}
+async function togSec(key){const body={};body[key]=!CU[key];await fetch(`/api/users/${CU.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});CU[key]=!CU[key];rSecurity();toast('Updated','success');}
 function showChgPw(){openM(`<div class="mh"><div class="mt">Change Password</div><button class="mx" onclick="closeM()">✕</button></div><div class="fg"><label>Current Password</label><input class="inp" type="password" id="pwc" placeholder="Current"></div><div class="fg"><label>New Password</label><input class="inp" type="password" id="pwn" placeholder="Min 6 chars"></div><div class="fg"><label>Confirm</label><input class="inp" type="password" id="pwf" placeholder="Confirm"></div><div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="doChgPw()">Update</button></div>`);}
 function doChgPw(){const c=document.getElementById('pwc')?.value,n=document.getElementById('pwn')?.value,f=document.getElementById('pwf')?.value;if(c!==CU.password){toast('Wrong current password','error');return;}if(n!==f){toast('Passwords do not match','error');return;}if(n.length<6){toast('Too short','error');return;}const users=DB.users();const u=users.find(x=>x.id===CU.id);if(u){u.password=n;CU=u;DB.su(users);}closeM();toast('Password changed!','success');}
 
 /* ═══════════════════════════════════════
    ADMIN SUPER PANEL
 ═══════════════════════════════════════ */
-function rAdmin(){
+async function rAdmin(){
   const p=document.getElementById('panel-admin');
-  const users=DB.users().filter(u=>u.id!=='admin-001'||(u.id==='admin-001'&&false));
+  p.innerHTML=`<div class="ph"><div class="ptt">⚜️ Admin Control Center</div></div><p style="color:var(--txm)">Loading…</p>`;
+  const [usRes,grpRes,clsRes,asgRes,apRes,msgRes,frmRes,resRes,schRes,qzRes,grRes]=await Promise.all([
+    fetch('/api/users').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/classrooms').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/approvals').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/messages/dm/all').then(x=>x.json()).catch(()=>({ok:false,messages:[]})),
+    fetch('/api/forum').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/resources').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/quizzes').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),
+  ]);
+  const users=usRes.ok?usRes.users:[];window._cachedUsers=users;
   const studs=users.filter(u=>u.role==='student'),tchs=users.filter(u=>u.role==='teacher');
+  const groups=grpRes.ok?grpRes.groups:[];
+  const cls=clsRes.ok?clsRes.classrooms:[];
+  const asgn=asgRes.ok?asgRes.assignments:[];
+  const pend=apRes.ok?apRes.approvals:[];
+  const grades=grRes.ok?grRes.grades:[];
+  const quizzes=qzRes.ok?qzRes.quizzes:[];
+  const resources=resRes.ok?resRes.resources:[];
+  const schedules=schRes.ok?schRes.schedules:[];
+  const forum=frmRes.ok?frmRes.posts:[];
+  window._adminData={users,groups,cls,asgn,pend,grades,quizzes,resources,schedules,forum};
   p.innerHTML=`<div class="ph"><div class="ptt">⚜️ Admin Control Center</div><div class="ps">Full authority over all platform data, users, and settings</div></div>
-    <div class="sr"><div class="sb2"><div class="sn" style="color:var(--blue)">${studs.length}</div><div class="sl2">Students</div></div><div class="sb2"><div class="sn" style="color:var(--gold)">${tchs.length}</div><div class="sl2">Teachers</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${DB.groups().length}</div><div class="sl2">Groups</div></div><div class="sb2"><div class="sn" style="color:var(--prp)">${DB.classrooms().length}</div><div class="sl2">Classrooms</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${DB.pending().length}</div><div class="sl2">Pending</div></div><div class="sb2"><div class="sn" style="color:var(--teal)">${DB.assignments().length}</div><div class="sl2">Assignments</div></div></div>
-    <div class="tbr"><div class="tb2 on" onclick="swAT(this,'au')">👥 Users</div><div class="tb2" onclick="swAT(this,'ad')">🗃️ Data</div><div class="tb2" onclick="swAT(this,'ao')">🔧 Options</div><div class="tb2" onclick="swAT(this,'as2')">⚙️ Site Settings</div><div class="tb2" onclick="swAT(this,'am')">💬 All Messages</div><div class="tb2" onclick="swAT(this,'alog')">📋 Activity Log</div></div>
-    <div id="au" class="tbc on">${buildUsersTable()}</div>
-    <div id="ad" class="tbc">${buildDataPanel()}</div>
+    <div class="sr"><div class="sb2"><div class="sn" style="color:var(--blue)">${studs.length}</div><div class="sl2">Students</div></div><div class="sb2"><div class="sn" style="color:var(--gold)">${tchs.length}</div><div class="sl2">Teachers</div></div><div class="sb2"><div class="sn" style="color:var(--grn)">${groups.length}</div><div class="sl2">Groups</div></div><div class="sb2"><div class="sn" style="color:var(--prp)">${cls.length}</div><div class="sl2">Classrooms</div></div><div class="sb2"><div class="sn" style="color:var(--red)">${pend.length}</div><div class="sl2">Pending</div></div><div class="sb2"><div class="sn" style="color:var(--teal)">${asgn.length}</div><div class="sl2">Assignments</div></div></div>
+    <div class="tbr"><div class="tb2 on" onclick="swAT(this,'au')">👥 Users</div><div class="tb2" onclick="swAT(this,'ad')">🗃️ Data</div><div class="tb2" onclick="swAT(this,'ao')">🔧 Options</div><div class="tb2" onclick="swAT(this,'as2')">⚙️ Site Settings</div><div class="tb2" onclick="swAT(this,'alog')">📋 Activity Log</div></div>
+    <div id="au" class="tbc on">${buildUsersTable(users)}</div>
+    <div id="ad" class="tbc">${buildDataPanel(grades,quizzes,resources,schedules,forum)}</div>
     <div id="ao" class="tbc">${buildOptsPanel()}</div>
     <div id="as2" class="tbc">${buildSitePanel()}</div>
-    <div id="am" class="tbc">${buildAllMsgs()}</div>
-    <div id="alog" class="tbc">${buildAdminLog()}</div>`;
+    <div id="alog" class="tbc"><p style="color:var(--txm);font-size:.82rem">Activity log is server-side. Check Railway deploy logs.</p></div>`;
 }
 function swAT(el,id){document.querySelectorAll('.tb2').forEach(b=>b.classList.remove('on'));el.classList.add('on');document.querySelectorAll('.tbc').forEach(c=>c.classList.remove('on'));document.getElementById(id)?.classList.add('on');}
-function buildUsersTable(){
-  const users=DB.users();
+function buildUsersTable(users){
   return `<div style="margin-bottom:10px;display:flex;gap:7px"><button class="btn bp bsm" onclick="showCreateUser()">+ Create User</button></div>
     <div style="overflow-x:auto"><table class="dt"><thead><tr><th>User</th><th>Role</th><th>Year</th><th>Status</th><th>Actions</th></tr></thead><tbody>${users.map(u=>`<tr><td><div style="display:flex;align-items:center;gap:8px">${avEl(u,26)}<div><div style="font-weight:600;font-size:.84rem">${esc(u.name)}</div><div style="font-size:.73rem;color:var(--txm)">${esc(u.email)}</div></div></div></td><td><span class="bdg ${u.role==='teacher'?'bg':u.role==='admin'?'bp2':'bb2'}">${u.role}</span></td><td>${u.year||'—'}</td><td><span class="bdg ${u.status==='approved'?'bgr':u.status==='banned'?'bd':'bg'}">${u.status}</span></td><td><div style="display:flex;gap:5px;flex-wrap:wrap"><button class="btn bs bxs" onclick="adminEditU('${u.id}')">Edit</button>${u.role!=='admin'?`${u.status!=='banned'?`<button class="btn br bxs" onclick="adminBan('${u.id}')">Ban</button>`:`<button class="btn bb bxs" onclick="adminUnban('${u.id}')">Unban</button>`}<button class="btn br bxs" onclick="adminDel('${u.id}')">Del</button><button class="btn bgh bxs" onclick="adminImpersonate('${u.id}')">View As</button>`:''}</div></td></tr>`).join('')}</tbody></table></div>`;
 }
-function buildDataPanel(){
-  const cfg=DB.siteCfg();
+function buildDataPanel(grades,quizzes,resources,schedules,forum){
   return `<div class="adms"><div class="admst">Quick Stats</div>
     <div class="ar2">
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Messages</div><div style="font-weight:700">${DB.messages().length}</div></div>
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Forum Posts</div><div style="font-weight:700">${DB.forum().length}</div></div>
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Resources</div><div style="font-weight:700">${DB.resources().length}</div></div>
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Schedules</div><div style="font-weight:700">${DB.schedules().length}</div></div>
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Quizzes</div><div style="font-weight:700">${DB.quizzes().length}</div></div>
-      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Grades</div><div style="font-weight:700">${DB.grades().length}</div></div>
-    </div></div>
-    <div class="adms"><div class="admst">Danger Zone</div>
-      <div class="ar2">
-        <button class="btn br bsm" onclick="if(confirm('Delete ALL messages?'))DB.sm([]);toast('Messages cleared','info')">Clear All Messages</button>
-        <button class="btn br bsm" onclick="if(confirm('Delete ALL forum posts?'))DB.sfr([]);toast('Forum cleared','info')">Clear Forum</button>
-        <button class="btn br bsm" onclick="if(confirm('Delete ALL grades?'))DB.sgrade([]);toast('Grades cleared','info')">Clear Grades</button>
-        <button class="btn br bsm" onclick="if(confirm('Delete ALL events?'))DB.se([]);toast('Events cleared','info')">Clear Events</button>
-        <button class="btn br bsm" onclick="adminResetPlatform()">⚠️ Full Platform Reset</button>
-      </div>
-    </div>`;
+      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Forum Posts</div><div style="font-weight:700">${(forum||[]).length}</div></div>
+      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Resources</div><div style="font-weight:700">${(resources||[]).length}</div></div>
+      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Schedules</div><div style="font-weight:700">${(schedules||[]).length}</div></div>
+      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Quizzes</div><div style="font-weight:700">${(quizzes||[]).length}</div></div>
+      <div class="sb2" style="text-align:left;padding:11px"><div style="font-size:.8rem;color:var(--txm)">Grades</div><div style="font-weight:700">${(grades||[]).length}</div></div>
+    </div></div>`;
 }
-function buildOptsPanel(){
-  const opts=DB.studyOptions();
-  return `<div style="display:flex;gap:7px;margin-bottom:11px"><input class="inp" id="newopt" placeholder="Add study programme…"><button class="btn bp bsm" onclick="addOpt()">Add</button></div>
-    <div class="cr">${opts.map(o=>`<div class="chp">${esc(o)}<span class="chx" onclick="rmOpt('${esc(o)}')">✕</span></div>`).join('')}</div>`;
-}
-function buildSitePanel(){
-  const cfg=DB.siteCfg();
-  return `<div class="adms"><div class="admst">Site Configuration</div>
-    <div class="fg"><label>Site Name</label><input class="inp" id="scn" value="${esc(cfg.name)}"></div>
-    <div class="fg"><label>Tagline</label><input class="inp" id="sct" value="${esc(cfg.tagline||'')}"></div>
-    <div class="sci"><div><div style="font-weight:600;font-size:.87rem">Open Registration</div><div style="font-size:.77rem;color:var(--txm)">Allow new users to register</div></div><div class="tgl ${cfg.regOpen?'on':''}" onclick="togSiteCfg('regOpen')"></div></div>
-    <div class="sci"><div><div style="font-weight:600;font-size:.87rem">Maintenance Mode</div><div style="font-size:.77rem;color:var(--txm)">Show maintenance notice to all users</div></div><div class="tgl ${cfg.maintenance?'on':''}" onclick="togSiteCfg('maintenance')"></div></div>
-    <button class="btn bp bsm" style="margin-top:11px" onclick="saveSiteCfg()">Save Configuration</button>
-    </div>`;
-}
-function buildAllMsgs(){
-  const msgs=DB.messages().sort((a,b)=>b.ts-a.ts).slice(0,50);
-  return `<div style="overflow-x:auto"><table class="dt"><thead><tr><th>From</th><th>To / Group</th><th>Type</th><th>Message</th><th>Time</th><th></th></tr></thead><tbody>${msgs.map(m=>{const from=gU(m.fromId);const toG=m.groupId?DB.groups().find(g=>g.id===m.groupId)?.name:gU(m.toId)?.name||'—';return `<tr><td>${esc(from?.name||'?')}</td><td>${esc(toG||'—')}</td><td><span class="bdg ${m.type==='group'?'bg':'bb2'}">${m.type}</span></td><td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.content)}</td><td style="color:var(--txm)">${fmtTime(m.ts)}</td><td><button class="btn br bxs" onclick="adminDelMsg('${m.id}')">Del</button></td></tr>`;}).join('')||'<tr><td colspan="6" style="text-align:center;color:var(--txm)">No messages</td></tr>'}</tbody></table></div>`;
-}
-function buildAdminLog(){
-  const log=DB.actLog().slice(0,50);
-  return `<button class="btn br bsm" style="margin-bottom:10px" onclick="DB.sal([]);rAdmin()">Clear Log</button><div style="overflow-x:auto"><table class="dt"><thead><tr><th>User</th><th>Role</th><th>Action</th><th>Detail</th><th>Time</th></tr></thead><tbody>${log.map(l=>`<tr><td>${esc(l.userName||'?')}</td><td><span class="bdg ${l.role==='admin'?'bp2':l.role==='teacher'?'bg':'bb2'}">${l.role}</span></td><td>${esc(l.action)}</td><td>${esc(l.detail||'—')}</td><td style="color:var(--txm)">${fmtDate(l.ts)} ${fmtTime(l.ts)}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--txm)">No logs</td></tr>'}</tbody></table></div>`;
-}
-function addOpt(){const v=document.getElementById('newopt')?.value.trim();if(!v)return;const opts=DB.studyOptions();if(!opts.includes(v)){opts.push(v);DB.s('studyOptions',opts);}rAdmin();toast('Added','success');}
-function rmOpt(o){DB.s('studyOptions',DB.studyOptions().filter(x=>x!==o));rAdmin();}
-function togSiteCfg(key){const cfg=DB.siteCfg();cfg[key]=!cfg[key];DB.ssc(cfg);rAdmin();toast('Updated','success');}
-function saveSiteCfg(){const cfg=DB.siteCfg();cfg.name=document.getElementById('scn')?.value||cfg.name;cfg.tagline=document.getElementById('sct')?.value||cfg.tagline;DB.ssc(cfg);rAdmin();toast('Saved!','success');}
-function adminDelMsg(id){DB.sm(DB.messages().filter(m=>m.id!==id));rAdmin();toast('Message deleted','info');}
-function adminBan(id){const u=DB.users();const x=u.find(y=>y.id===id);if(x){x.status='banned';DB.su(u);rAdmin();toast('Banned','info');}}
-function adminUnban(id){const u=DB.users();const x=u.find(y=>y.id===id);if(x){x.status='approved';DB.su(u);rAdmin();toast('Unbanned','success');}}
-function adminDel(id){if(!confirm('Permanently delete user?'))return;DB.su(DB.users().filter(u=>u.id!==id));DB.sp2(DB.pending().filter(p=>p.userId!==id));rAdmin();toast('Deleted','info');}
-function adminImpersonate(id){const u=gU(id);if(!u){toast('User not found','error');return;}if(!confirm(`View platform as ${u.name}? You will need to re-login as Admin afterwards.`))return;CU=u;enterApp();toast(`Now viewing as ${u.name}. Log out to return.`,'warn');}
+async function adminBan(id){await fetch(`/api/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'banned'})});rAdmin();toast('Banned','info');}
+async function adminUnban(id){await fetch(`/api/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'approved'})});rAdmin();toast('Unbanned','success');}
+async function adminDel(id){if(!confirm('Permanently delete user?'))return;await fetch(`/api/users/${id}`,{method:'DELETE'});rAdmin();toast('Deleted','info');}
+function adminImpersonate(id){const u=(window._cachedUsers||[]).find(x=>x.id===id);if(!u){toast('User not found','error');return;}if(!confirm(`View platform as ${u.name}? You will need to re-login as Admin afterwards.`))return;CU=u;enterApp();toast(`Now viewing as ${u.name}. Log out to return.`,'warn');}
 function adminEditU(id){
-  const u=gU(id);if(!u)return;const opts=DB.studyOptions().map(o=>`<option ${(u.studyingAs||u.studying_as)===o?'selected':''}>${esc(o)}</option>`).join('');
+  const u=(window._cachedUsers||[]).find(x=>x.id===id);if(!u)return;const opts=(DB.studyOptions()).map(o=>`<option ${(u.studyingAs||u.studying_as)===o?'selected':''}>${esc(o)}</option>`).join('');
   openM(`<div class="mh"><div class="mt">Edit: ${esc(u.name)}</div><button class="mx" onclick="closeM()">✕</button></div>
     <div class="fr"><div class="fg"><label>Name</label><input class="inp" id="eu-n" value="${esc(u.name)}"></div><div class="fg"><label>Email</label><input class="inp" id="eu-e" value="${esc(u.email)}"></div></div>
     <div class="fr"><div class="fg"><label>Role</label><select class="inp" id="eu-r"><option value="student" ${u.role==='student'?'selected':''}>Student</option><option value="teacher" ${u.role==='teacher'?'selected':''}>Teacher</option><option value="parent" ${u.role==='parent'?'selected':''}>Parent</option></select></div><div class="fg"><label>Year</label><select class="inp" id="eu-y"><option value="">None</option><option value="1st" ${u.year==='1st'?'selected':''}>1st</option><option value="2nd" ${u.year==='2nd'?'selected':''}>2nd</option><option value="3rd" ${u.year==='3rd'?'selected':''}>3rd</option></select></div></div>
@@ -1552,32 +1627,23 @@ function adminEditU(id){
     <div class="fg"><label>New Password (blank = no change)</label><input class="inp" type="password" id="eu-p" placeholder="Leave blank to keep"></div>
     <div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="adminSaveU('${id}')">Save All Changes</button></div>`);
 }
-function adminSaveU(id){
-  const users=DB.users();const u=users.find(x=>x.id===id);if(!u)return;
-  u.name=document.getElementById('eu-n').value.trim()||u.name;
-  u.email=document.getElementById('eu-e').value.trim()||u.email;
-  u.role=document.getElementById('eu-r').value;
-  u.year=document.getElementById('eu-y').value||null;
-  u.studyingAs=document.getElementById('eu-s').value||null;
-  u.status=document.getElementById('eu-st').value;
-  const np=document.getElementById('eu-p').value;if(np&&np.length>=6)u.password=np;
-  DB.su(users);closeM();rAdmin();toast('User updated!','success');logAct('ADMIN_EDIT',u.name);
+async function adminSaveU(id){
+  const body={name:document.getElementById('eu-n').value.trim(),email:document.getElementById('eu-e').value.trim(),role:document.getElementById('eu-r').value,year:document.getElementById('eu-y').value||null,studying_as:document.getElementById('eu-s').value||null,status:document.getElementById('eu-st').value};
+  const np=document.getElementById('eu-p').value;if(np&&np.length>=6)body.password=np;
+  await fetch(`/api/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  closeM();rAdmin();toast('User updated!','success');logAct('ADMIN_EDIT',body.name);
 }
-function showCreateUser(){
-  openM(`<div class="mh"><div class="mt">+ Create User</div><button class="mx" onclick="closeM()">✕</button></div>
-    <div class="fr"><div class="fg"><label>Name</label><input class="inp" id="cu-n" placeholder="Full name"></div><div class="fg"><label>Email</label><input class="inp" id="cu-e" placeholder="email@…"></div></div>
-    <div class="fr"><div class="fg"><label>Password</label><input class="inp" type="password" id="cu-p" placeholder="Min 6 chars"></div><div class="fg"><label>Role</label><select class="inp" id="cu-r"><option value="student">Student</option><option value="teacher">Teacher</option><option value="parent">Parent</option></select></div></div>
-    <div class="fg"><label>Year</label><select class="inp" id="cu-y"><option value="">None</option><option value="1st">1st</option><option value="2nd">2nd</option><option value="3rd">3rd</option></select></div>
-    <div style="display:flex;justify-content:flex-end;gap:7px"><button class="btn bgh" onclick="closeM()">Cancel</button><button class="btn bp" onclick="adminCreateU()">Create &amp; Approve</button></div>`);
-}
-function adminCreateU(){
+async function adminCreateU(){
   const n=document.getElementById('cu-n').value.trim(),e=document.getElementById('cu-e').value.trim(),p=document.getElementById('cu-p').value,r=document.getElementById('cu-r').value,y=document.getElementById('cu-y').value;
   if(!n||!e||!p){toast('Fill all fields','error');return;}if(p.length<6){toast('Password too short','error');return;}
-  if(DB.users().find(u=>u.email.toLowerCase()===e.toLowerCase())){toast('Email taken','error');return;}
-  const nu={id:uid(),name:n,email:e,password:p,role:r,profilePic:null,year:y||null,studyingAs:null,status:'approved',approvedBy:CU.id,createdAt:now()};
-  const users=DB.users();users.push(nu);DB.su(users);closeM();rAdmin();toast('User created and approved!','success');logAct('ADMIN_CREATE',n);
+  const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,email:e,password:p,role:r,year:y||null})}).then(x=>x.json());
+  if(!res.ok){toast(res.error||'Failed','error');return;}
+  // Auto-approve
+  const apRes=await fetch('/api/approvals').then(x=>x.json()).catch(()=>({ok:false}));
+  if(apRes.ok){const ap=apRes.approvals.find(a=>a.role===r);if(ap)await fetch(`/api/approvals/${ap.id}/approve`,{method:'POST'});}
+  closeM();rAdmin();toast('User created and approved!','success');logAct('ADMIN_CREATE',n);
 }
-function adminResetPlatform(){if(prompt('Type RESET to confirm full platform reset:')!=='RESET'){return;}Object.keys(localStorage).filter(k=>k.startsWith('ps2_')).forEach(k=>localStorage.removeItem(k));location.reload();}
+function adminResetPlatform(){toast('Platform reset not available in server mode','warn');}
 
 /* ═══════════════════════════════════════
    PROFILE
@@ -1832,11 +1898,12 @@ async function sendAIMsg(){
   },40);
 
   try{
-    // Build context-aware system prompt
-    const grades=DB.grades().filter(g=>g.studentId===CU.id).slice(0,8);
-    const schedules=DB.schedules().filter(s=>s.userId===CU.id);
+    // Build context-aware system prompt using server data
+    const [grRes,schRes]=await Promise.all([fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false}))]);
+    const grades=grRes.ok?grRes.grades.slice(0,8):[];
+    const schedules=schRes.ok?schRes.schedules:[];
     const userCtx=`You are an AI Study Assistant inside Patrician Study, a learning platform. 
-You are helping ${CU.name}, a ${CU.role}${CU.year?' in year '+CU.year:''}${CU.studyingAs?' studying '+CU.studyingAs:''}.
+You are helping ${CU.name}, a ${CU.role}${CU.year?' in year '+CU.year:''}${CU.studying_as||CU.studyingAs?' studying '+(CU.studying_as||CU.studyingAs):''}.
 ${grades.length?'Recent quiz scores: '+grades.map(g=>`${g.subject}: ${g.score}%`).join(', '):''}.
 ${schedules.length?'They have study schedules for: '+schedules.map(s=>s.name).join(', '):''}.
 Be helpful, encouraging, and pedagogically sound. Use clear explanations with examples. 
@@ -1846,13 +1913,12 @@ Keep responses focused and educational. Celebrate progress and be patient.`;
     // Build message history for context
     const history=conv.msgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
 
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,system:userCtx,messages:history})});
+    const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({system:userCtx,messages:history,max_tokens:2500})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
-    const data=await res.json();
-    const reply=data.content[0].text;
+    const data=await res.json();if(!data.ok)throw new Error(data.error||'AI failed');
+    const reply=data.text;
 
     conv.msgs.push({role:'assistant',content:reply,ts:now()});
   }catch(err){
@@ -1873,14 +1939,14 @@ let plannerRecs=[];   // [{type,text,priority}]
 let plannerStreaming=false;
 let plannerAnalysed=false;
 
-function rPlanner(){
+async function rPlanner(){
   const p=document.getElementById('panel-planner');
-  const streak=calcStreak();
+  const [streak,snapshotHTML]=await Promise.all([calcStreak(),buildSnapshotHTML()]);
   const todayGoals=plannerGoals.filter(g=>!g.done).slice(0,6);
   const doneGoals=plannerGoals.filter(g=>g.done).length;
 
   p.innerHTML=`
-  <div class="ph"><div class="ptt">🗺️ AI Study Planner</div><div class="ps">Personalised plans, goals, and intelligent recommendations powered by Claude</div></div>
+  <div class="ph"><div class="ptt">🗺️ AI Study Planner</div><div class="ps">Personalised plans, goals, and intelligent recommendations powered by AI</div></div>
   <div class="planner-layout">
 
     <!-- Left panel: goals, stats, recs -->
@@ -1904,7 +1970,7 @@ function rPlanner(){
 
       <div class="planner-card" style="margin-bottom:14px">
         <div class="planner-card-title">📊 Your Academic Snapshot</div>
-        ${buildSnapshotHTML()}
+        ${snapshotHTML}
       </div>
 
       ${plannerRecs.length?`<div class="planner-card">
@@ -1954,18 +2020,25 @@ function buildPlannerWelcome(){
   </div>`;
 }
 
-function buildSnapshotHTML(){
-  const grades=DB.grades().filter(g=>g.studentId===CU.id);
+async function buildSnapshotHTML(){
+  const [grRes,asgRes,schRes,grpRes]=await Promise.all([
+    fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false})),
+  ]);
+  const grades=grRes.ok?grRes.grades:[];
   const quizG=grades.filter(g=>g.type==='quiz');
   const avg=quizG.length?Math.round(quizG.reduce((a,g)=>a+g.score,0)/quizG.length):null;
-  const assignments=DB.assignments().filter(a=>{
-    if(a.assignedTo?.includes(CU.id))return true;
-    if(a.assignedYear===CU.year)return true;
-    const gr=DB.groups().find(x=>x.id===a.assignedGroup);return gr&&gr.members?.includes(CU.id);
-  });
-  const overdue=assignments.filter(a=>a.dueDate&&daysUntil(a.dueDate)<0&&!(a.submissions||[]).find(s=>s.studentId===CU.id));
-  const due3=assignments.filter(a=>a.dueDate&&daysUntil(a.dueDate)>=0&&daysUntil(a.dueDate)<=3&&!(a.submissions||[]).find(s=>s.studentId===CU.id));
-  const schedules=DB.schedules().filter(s=>s.userId===CU.id);
+  const allGroups=grpRes.ok?grpRes.groups:[];
+  const assignments=asgRes.ok?asgRes.assignments.filter(a=>{
+    if((a.assigned_to||a.assignedTo||[]).includes(CU.id))return true;
+    if((a.assigned_year||a.assignedYear)===CU.year)return true;
+    const gr=allGroups.find(x=>x.id===(a.assigned_group||a.assignedGroup));return gr&&(gr.members||[]).includes(CU.id);
+  }):[];
+  const overdue=assignments.filter(a=>(a.due_date||a.dueDate)&&daysUntil(a.due_date||a.dueDate)<0&&!(a.submissions||[]).find(s=>s.student_id===CU.id||s.studentId===CU.id));
+  const due3=assignments.filter(a=>(a.due_date||a.dueDate)&&daysUntil(a.due_date||a.dueDate)>=0&&daysUntil(a.due_date||a.dueDate)<=3&&!(a.submissions||[]).find(s=>s.student_id===CU.id||s.studentId===CU.id));
+  const schedules=schRes.ok?schRes.schedules:[];
   const subMap={};quizG.forEach(g=>{if(!subMap[g.subject])subMap[g.subject]=[];subMap[g.subject].push(g.score);});
   const weakSubs=Object.entries(subMap).filter(([,s])=>s.reduce((a,b)=>a+b,0)/s.length<65).map(([k])=>k);
   return `<div style="display:flex;flex-direction:column;gap:7px">
@@ -1978,9 +2051,9 @@ function buildSnapshotHTML(){
   </div>`;
 }
 
-function calcStreak(){
-  // Simple streak: count consecutive days with quiz activity
-  const grades=DB.grades().filter(g=>g.studentId===CU.id);
+async function calcStreak(){
+  const r=await fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false}));
+  const grades=r.ok?r.grades:[];
   if(!grades.length)return 0;
   const days=[...new Set(grades.map(g=>new Date(g.ts).toDateString()))];
   let streak=0,d=new Date();
@@ -2004,25 +2077,32 @@ async function runPlannerAnalysis(){
   if(plannerStreaming)return;
   showLoad('AI analysing your study profile…');
 
-  // Build comprehensive user data snapshot
-  const grades=DB.grades().filter(g=>g.studentId===CU.id);
+  // Fetch comprehensive user data from server
+  const [grRes,asgRes,schRes,grpRes]=await Promise.all([
+    fetch('/api/grades').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/assignments').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/schedules').then(x=>x.json()).catch(()=>({ok:false})),
+    fetch('/api/groups').then(x=>x.json()).catch(()=>({ok:false})),
+  ]);
+  const grades=grRes.ok?grRes.grades:[];
   const quizG=grades.filter(g=>g.type==='quiz');
   const subMap={};quizG.forEach(g=>{if(!subMap[g.subject])subMap[g.subject]=[];subMap[g.subject].push(g.score);});
   const subAvgs=Object.entries(subMap).map(([k,v])=>({subject:k,avg:Math.round(v.reduce((a,b)=>a+b,0)/v.length),count:v.length}));
-  const assignments=DB.assignments().filter(a=>{
-    if(a.assignedTo?.includes(CU.id))return true;if(a.assignedYear===CU.year)return true;
-    const gr=DB.groups().find(x=>x.id===a.assignedGroup);return gr&&gr.members?.includes(CU.id);
-  });
-  const pending=assignments.filter(a=>!(a.submissions||[]).find(s=>s.studentId===CU.id));
-  const schedules=DB.schedules().filter(s=>s.userId===CU.id);
+  const allGroups=grpRes.ok?grpRes.groups:[];
+  const assignments=asgRes.ok?asgRes.assignments.filter(a=>{
+    if((a.assigned_to||a.assignedTo||[]).includes(CU.id))return true;if((a.assigned_year||a.assignedYear)===CU.year)return true;
+    const gr=allGroups.find(x=>x.id===(a.assigned_group||a.assignedGroup));return gr&&(gr.members||[]).includes(CU.id);
+  }):[];
+  const pending=assignments.filter(a=>!(a.submissions||[]).find(s=>s.student_id===CU.id||s.studentId===CU.id));
+  const schedules=schRes.ok?schRes.schedules:[];
   const examDates=schedules.flatMap(s=>(s.subjects||[]).filter(x=>x.examDate).map(x=>({subject:x.name,date:x.examDate,daysLeft:daysUntil(x.examDate)})));
   const currentGoals=plannerGoals.filter(g=>!g.done).map(g=>g.text);
 
   const dataPacket=JSON.stringify({
-    student:{name:CU.name,year:CU.year,programme:CU.studyingAs},
+    student:{name:CU.name,year:CU.year,programme:CU.studying_as||CU.studyingAs},
     quizPerformance:subAvgs,
     totalQuizzes:quizG.length,
-    pendingAssignments:pending.map(a=>({title:a.title,dueDate:a.dueDate,daysLeft:a.dueDate?daysUntil(a.dueDate):null})),
+    pendingAssignments:pending.map(a=>({title:a.title,dueDate:a.due_date||a.dueDate,daysLeft:(a.due_date||a.dueDate)?daysUntil(a.due_date||a.dueDate):null})),
     upcomingExams:examDates.sort((a,b)=>a.daysLeft-b.daysLeft).slice(0,8),
     studySchedules:schedules.map(s=>s.name),
     currentGoals
@@ -2073,13 +2153,12 @@ When generating a study plan, structure it as:
     const history=plannerMsgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
     if(suppressUserMsg)history.push({role:'user',content});
 
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2800,system:sysPrompt,messages:history})});
+    const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({system:sysPrompt,messages:history,max_tokens:2800})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
-    const data=await res.json();
-    const reply=data.content[0].text;
+    const data=await res.json();if(!data.ok)throw new Error(data.error||'AI failed');
+    const reply=data.text;
 
     if(!suppressUserMsg){}else plannerMsgs.push({role:'user',content:isAnalysis?'[AI analysed my study profile]':content,ts:now()});
     plannerMsgs.push({role:'assistant',content:reply,ts:now()});
