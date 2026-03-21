@@ -765,14 +765,14 @@ function showTab(tab){
    AI
 ═══════════════════════════════════════ */
 async function callAI(prompt,sys){
-  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
   if(!res.ok)throw new Error('AI error '+res.status);
-  const d=await res.json();return d.text;
+  const d=await res.json();return d.content[0].text;
 }
 async function callAIpdf(b64,prompt){
-  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
   if(!res.ok)throw new Error('AI PDF error');
-  const d=await res.json();return d.text;
+  const d=await res.json();return d.content[0].text;
 }
 function pJSON(t){return JSON.parse(t.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,''))}
 
@@ -1358,22 +1358,48 @@ function delA(id){if(!confirm('Delete?'))return;DB.sa(DB.assignments().filter(a=
 /* ═══════════════════════════════════════
    APPROVALS
 ═══════════════════════════════════════ */
-function rApprovals(){
+async function rApprovals(){
   const p=document.getElementById('panel-approvals');
   const isAdmin=CU.role==='admin';
-  const pend=DB.pending().filter(pa=>isAdmin||pa.role==='student');
-  p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div>
-    ${pend.length?pend.map(pa=>{const u=gU(pa.userId);if(!u)return '';return `<div class="pr">${avEl(u,42)}<div style="flex:1"><div style="font-weight:700">${esc(u.name)}</div><div style="font-size:.75rem;color:var(--txm)">${esc(u.email)} · <span class="bdg ${u.role==='teacher'?'bg':'bb2'}">${u.role}</span></div>${u.studyingAs?`<div style="font-size:.72rem;color:var(--txm)">${esc(u.studyingAs)}${u.year?' · '+u.year:''}</div>`:''}</div><div class="btns"><button class="btn bp bsm" onclick="apprU('${pa.id}')">✓ Approve</button><button class="btn br bsm" onclick="rejU('${pa.id}')">✕ Reject</button></div></div>`;}).join(''):`<div class="es"><div class="ei">✅</div><p>No pending approvals</p></div>`}
-    ${isAdmin?`<hr class="sdiv"><div style="font-weight:700;margin-bottom:9px;font-size:.84rem">Teacher Year Assignments</div>${rTY()}`:''}`;
+  p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div><div style="color:var(--txm);font-size:.84rem">Loading...</div>`;
+  try{
+    // Fetch pending users from server
+    const [apRes,usRes]=await Promise.all([
+      fetch('/api/approvals').then(r=>r.json()),
+      fetch('/api/users').then(r=>r.json())
+    ]);
+    const approvals=apRes.ok?apRes.approvals:[];
+    const allUsers=usRes.ok?usRes.users:[];
+    const pend=isAdmin?approvals:approvals.filter(pa=>pa.role==='student');
+    p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div>
+      ${pend.length?pend.map(pa=>{
+        const u=allUsers.find(x=>x.id===pa.user_id);
+        if(!u)return '';
+        return `<div class="pr">${avEl(u,42)}<div style="flex:1"><div style="font-weight:700">${esc(u.name)}</div><div style="font-size:.75rem;color:var(--txm)">${esc(u.email)} · <span class="bdg ${u.role==='teacher'?'bg':'bb2'}">${u.role}</span></div>${u.studying_as?`<div style="font-size:.72rem;color:var(--txm)">${esc(u.studying_as)}${u.year?' · '+u.year:''}</div>`:''}</div><div class="btns"><button class="btn bp bsm" onclick="apprU('${pa.id}')">✓ Approve</button><button class="btn br bsm" onclick="rejU('${pa.id}')">✕ Reject</button></div></div>`;
+      }).join(''):`<div class="es"><div class="ei">✅</div><p>No pending approvals</p></div>`}
+      ${isAdmin?`<hr class="sdiv"><div style="font-weight:700;margin-bottom:9px;font-size:.84rem">Teacher Year Assignments</div>${rTY(allUsers)}`:''}`;
+  }catch(e){p.innerHTML=`<div class="ph"><div class="ptt">Approval Requests</div></div><div style="color:var(--red)">Failed to load approvals</div>`;}
 }
-function rTY(){
-  const teachers=DB.users().filter(u=>u.role==='teacher'&&u.status==='approved');
+function rTY(allUsers){
+  const teachers=(allUsers||[]).filter(u=>u.role==='teacher'&&u.status==='approved');
   const ty=DB.g('teacherYears')||[];
   if(!teachers.length)return '<p style="color:var(--txm);font-size:.82rem">No approved teachers</p>';
   return teachers.map(t=>{const asgn=ty.filter(x=>x.tid===t.id).map(x=>x.yr);return `<div style="display:flex;align-items:center;gap:9px;padding:8px 0;border-bottom:1px solid var(--bdr)">${avEl(t,28)}<span style="flex:1;font-weight:600;font-size:.84rem">${esc(t.name)}</span>${['1st','2nd','3rd'].map(yr=>`<label style="display:flex;align-items:center;gap:3px;font-size:.77rem;cursor:pointer"><input type="checkbox" ${asgn.includes(yr)?'checked':''} onchange="togTY('${t.id}','${yr}',this.checked)"> ${yr}</label>`).join('')}</div>`;}).join('');
 }
-function apprU(pid){const pa=DB.pending().find(x=>x.id===pid);if(!pa)return;const users=DB.users();const u=users.find(x=>x.id===pa.userId);if(u){u.status='approved';u.approvedBy=CU.id;DB.su(users);}DB.sp2(DB.pending().filter(p=>p.id!==pid));pushNotif(pa.userId,'Account approved! You can now sign in.','✅','success');buildNav();rApprovals();toast('Approved!','success');logAct('APPROVE',u?.name||'');}
-function rejU(pid){const pa=DB.pending().find(x=>x.id===pid);if(pa){DB.su(DB.users().filter(u=>u.id!==pa.userId));DB.sp2(DB.pending().filter(p=>p.id!==pid));}buildNav();rApprovals();toast('Rejected','info');}
+async function apprU(pid){
+  try{
+    const r=await fetch(`/api/approvals/${pid}/approve`,{method:'POST'}).then(x=>x.json());
+    if(!r.ok)return toast('Approval failed','error');
+    buildNav();rApprovals();toast('Approved!','success');
+  }catch(e){toast('Error approving','error');}
+}
+async function rejU(pid){
+  try{
+    const r=await fetch(`/api/approvals/${pid}/reject`,{method:'POST'}).then(x=>x.json());
+    if(!r.ok)return toast('Rejection failed','error');
+    buildNav();rApprovals();toast('Rejected','info');
+  }catch(e){toast('Error rejecting','error');}
+}
 function togTY(tid,yr,on){const ty=DB.g('teacherYears')||[];const f=ty.filter(t=>!(t.tid===tid&&t.yr===yr));if(on)f.push({tid,yr});DB.s('teacherYears',f);toast('Updated','success');}
 
 /* ═══════════════════════════════════════
@@ -1820,13 +1846,13 @@ Keep responses focused and educational. Celebrate progress and be patient.`;
     // Build message history for context
     const history=conv.msgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
 
-    const res=await fetch('/api/ai/chat',{method:'POST',
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,system:userCtx,messages:history})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.text;
+    const reply=data.content[0].text;
 
     conv.msgs.push({role:'assistant',content:reply,ts:now()});
   }catch(err){
@@ -2047,13 +2073,13 @@ When generating a study plan, structure it as:
     const history=plannerMsgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
     if(suppressUserMsg)history.push({role:'user',content});
 
-    const res=await fetch('/api/ai/chat',{method:'POST',
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2800,system:sysPrompt,messages:history})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    const reply=data.text;
+    const reply=data.content[0].text;
 
     if(!suppressUserMsg){}else plannerMsgs.push({role:'user',content:isAnalysis?'[AI analysed my study profile]':content,ts:now()});
     plannerMsgs.push({role:'assistant',content:reply,ts:now()});
@@ -2109,6 +2135,3 @@ showScr('sl');
 </script>
 </body>
 </html>
-
-
-
