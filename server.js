@@ -35,9 +35,37 @@ const db = mysql.createPool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Test the database connection on startup
+// Test the database connection on startup and auto-create missing tables
 db.getConnection()
-  .then(conn => { console.log('✅  MySQL connected successfully'); conn.release(); })
+  .then(async conn => {
+    console.log('✅  MySQL connected successfully');
+    conn.release();
+    // Auto-create schedules table if missing
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS schedules (
+        id          VARCHAR(32) PRIMARY KEY,
+        user_id     VARCHAR(32),
+        name        VARCHAR(200),
+        subjects    LONGTEXT,
+        start_date  VARCHAR(20),
+        start_time  VARCHAR(10),
+        break_min   INT DEFAULT 10,
+        \`generated\` LONGTEXT,
+        created_at  BIGINT
+      )
+    `).catch(e => console.error('schedules table error:', e.message));
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS events (
+        id         VARCHAR(32) PRIMARY KEY,
+        user_id    VARCHAR(32),
+        title      VARCHAR(200),
+        date       VARCHAR(20),
+        type       VARCHAR(30),
+        created_at BIGINT
+      )
+    `).catch(e => console.error('events table error:', e.message));
+    console.log('✅  Tables verified');
+  })
   .catch(err => console.error('❌  MySQL connection failed:', err.message));
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
@@ -561,7 +589,7 @@ app.get('/api/schedules', auth, async (req, res) => {
     const where = req.session.userRole === 'admin' ? '' : 'WHERE user_id = ?';
     const params = req.session.userRole === 'admin' ? [] : [req.session.userId];
     const [rows] = await db.execute(`SELECT * FROM schedules ${where} ORDER BY created_at DESC`, params);
-    rows.forEach(r => { try { r.subjects = JSON.parse(r.subjects); r.generated = JSON.parse(r.generated || r['\`generated\`']); } catch {} });
+    rows.forEach(r => { try { r.subjects = JSON.parse(r.subjects); r.generated = JSON.parse(r.schedule_data || '[]'); } catch {} });
     res.json({ ok: true, schedules: rows });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
@@ -579,10 +607,10 @@ app.post('/api/schedules', auth, async (req, res) => {
     const ts         = now();
     await db.execute(
       `INSERT INTO schedules
-         (id, user_id, name, subjects, start_date, start_time, break_min, \`generated\`, created_at)
+         (id, user_id, name, subjects, start_date, start_time, break_min, schedule_data, created_at)
        VALUES (?,?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
-         name=?, subjects=?, \`generated\`=?, start_date=?, start_time=?, break_min=?`,
+         name=?, subjects=?, schedule_data=?, start_date=?, start_time=?, break_min=?`,
       [sid, req.session.userId, safeName, safeSubs, safeDate, safeTime, safeBreak, safeGen, ts,
        safeName, safeSubs, safeGen, safeDate, safeTime, safeBreak]
     );
