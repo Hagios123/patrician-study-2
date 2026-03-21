@@ -561,7 +561,7 @@ app.get('/api/schedules', auth, async (req, res) => {
     const where = req.session.userRole === 'admin' ? '' : 'WHERE user_id = ?';
     const params = req.session.userRole === 'admin' ? [] : [req.session.userId];
     const [rows] = await db.execute(`SELECT * FROM schedules ${where} ORDER BY created_at DESC`, params);
-    rows.forEach(r => { try { r.subjects = JSON.parse(r.subjects); r.generated = JSON.parse(r.generated); } catch {} });
+    rows.forEach(r => { try { r.subjects = JSON.parse(r.subjects); r.generated = JSON.parse(r.generated || r['\`generated\`']); } catch {} });
     res.json({ ok: true, schedules: rows });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
@@ -579,10 +579,10 @@ app.post('/api/schedules', auth, async (req, res) => {
     const ts         = now();
     await db.execute(
       `INSERT INTO schedules
-         (id, user_id, name, subjects, start_date, start_time, break_min, generated, created_at)
+         (id, user_id, name, subjects, start_date, start_time, break_min, \`generated\`, created_at)
        VALUES (?,?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
-         name=?, subjects=?, generated=?, start_date=?, start_time=?, break_min=?`,
+         name=?, subjects=?, \`generated\`=?, start_date=?, start_time=?, break_min=?`,
       [sid, req.session.userId, safeName, safeSubs, safeDate, safeTime, safeBreak, safeGen, ts,
        safeName, safeSubs, safeGen, safeDate, safeTime, safeBreak]
     );
