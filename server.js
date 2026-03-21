@@ -42,6 +42,7 @@ db.getConnection()
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 app.use(cors({ origin: true, credentials: true }));
+app.set("trust proxy", 1);
 app.use(express.json({ limit: '10mb' }));            // parse JSON request bodies
 app.use(express.static(path.join(__dirname, 'public'))); // serve website files
 
