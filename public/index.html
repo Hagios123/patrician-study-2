@@ -696,29 +696,32 @@ function renderAuthForm(){
       <button class="btn bp" style="width:100%;justify-content:center" onclick="doRegister()">Create Account</button>`;
   }
 }
-function doLogin(){
+async function doLogin(){
   const email=document.getElementById('ae')?.value.trim(),pass=document.getElementById('ap')?.value;
   if(!email||!pass){toast('Fill all fields','error');return;}
-  const u=DB.users().find(x=>x.email.toLowerCase()===email.toLowerCase()&&x.password===pass);
-  if(!u){toast('Invalid credentials','error');return;}
-  if(_role!=='admin'&&u.role!==_role){toast('Wrong portal for your role','error');return;}
-  if(u.status==='banned'){toast('Account banned','error');return;}
-  if(u.status==='pending'){toast('Account pending approval','error');return;}
-  CU=u;logAct('LOGIN','Signed in');enterApp();
+  try{
+    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({email,password:pass,role:_role})});
+    const data=await res.json();
+    if(!data.ok){toast(data.error||'Invalid credentials','error');return;}
+    CU=data.user;enterApp();
+  }catch(e){toast('Server error: '+e.message,'error');}
 }
-function doRegister(){
+async function doRegister(){
   const name=document.getElementById('an')?.value.trim(),email=document.getElementById('ae')?.value.trim(),pass=document.getElementById('ap')?.value;
   const study=document.getElementById('as2')?.value||'',year=document.getElementById('ay')?.value||null;
   if(!name||!email||!pass){toast('Fill all fields','error');return;}
   if(pass.length<6){toast('Password too short','error');return;}
-  if(DB.users().find(u=>u.email.toLowerCase()===email.toLowerCase())){toast('Email already registered','error');return;}
-  const nu={id:uid(),name,email,password:pass,role:_role,profilePic:null,year,studyingAs:study||null,status:'pending',createdAt:now()};
-  const users=DB.users();users.push(nu);DB.su(users);
-  const pa=DB.pending();pa.push({id:uid(),userId:nu.id,role:_role,requestedAt:now()});DB.sp2(pa);
-  const adm=DB.users().find(u=>u.role==='admin');if(adm)pushNotif(adm.id,`New ${_role} registration: ${name}`,'👤','info');
-  toast('Account created! Awaiting approval.','success');swTab('login');
+  try{
+    const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name,email,password:pass,role:_role,year,studyingAs:study||null})});
+    const data=await res.json();
+    if(!data.ok){toast(data.error||'Registration failed','error');return;}
+    toast('Account created! Awaiting approval.','success');swTab('login');
+  }catch(e){toast('Server error: '+e.message,'error');}
 }
-function logout(){logAct('LOGOUT','Signed out');CU=null;AGid=null;AFid=null;showScr('sl')}
+async function logout(){
+  try{await fetch('/api/logout',{method:'POST',credentials:'include'});}catch(e){}
+  CU=null;AGid=null;AFid=null;showScr('sl');
+}
 
 /* ═══════════════════════════════════════
    NAVIGATION
@@ -762,14 +765,14 @@ function showTab(tab){
    AI
 ═══════════════════════════════════════ */
 async function callAI(prompt,sys){
-  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:sys||'You are an educational AI. Return only valid JSON when asked.',messages:[{role:'user',content:prompt}]})});
   if(!res.ok)throw new Error('AI error '+res.status);
-  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI error');return d.text;
+  const d=await res.json();return d.content[0].text;
 }
 async function callAIpdf(b64,prompt){
-  const res=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:3500,system:'Extract exam schedules from PDFs. Return only valid JSON.',messages:[{role:'user',content:[{type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}},{type:'text',text:prompt}]}]})});
   if(!res.ok)throw new Error('AI PDF error');
-  const d=await res.json();if(!d.ok)throw new Error(d.error||'AI error');return d.text;
+  const d=await res.json();return d.content[0].text;
 }
 function pJSON(t){return JSON.parse(t.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,''))}
 
@@ -1817,14 +1820,13 @@ Keep responses focused and educational. Celebrate progress and be patient.`;
     // Build message history for context
     const history=conv.msgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
 
-    const res=await fetch('/api/ai/chat',{method:'POST',
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({system:userCtx,messages:history,max_tokens:2500})});
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2500,system:userCtx,messages:history})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    if(!data.ok)throw new Error(data.error||'AI request failed');
-    const reply=data.text;
+    const reply=data.content[0].text;
 
     conv.msgs.push({role:'assistant',content:reply,ts:now()});
   }catch(err){
@@ -2045,14 +2047,13 @@ When generating a study plan, structure it as:
     const history=plannerMsgs.map(m=>({role:m.role==='user'?'user':'assistant',content:m.content}));
     if(suppressUserMsg)history.push({role:'user',content});
 
-    const res=await fetch('/api/ai/chat',{method:'POST',
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({system:sysPrompt,messages:history,max_tokens:2800})});
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2800,system:sysPrompt,messages:history})});
 
     if(!res.ok)throw new Error('AI request failed ('+res.status+')');
     const data=await res.json();
-    if(!data.ok)throw new Error(data.error||'AI request failed');
-    const reply=data.text;
+    const reply=data.content[0].text;
 
     if(!suppressUserMsg){}else plannerMsgs.push({role:'user',content:isAnalysis?'[AI analysed my study profile]':content,ts:now()});
     plannerMsgs.push({role:'assistant',content:reply,ts:now()});
