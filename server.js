@@ -49,8 +49,9 @@ app.use(session({
   secret:            process.env.SESSION_SECRET || 'patrician_secret_2024',
   resave:            false,
   saveUninitialized: false,
+  proxy: true,
   cookie: {
-    secure:   process.env.NODE_ENV === 'production',
+    secure:   false,
     httpOnly: true,
     maxAge:   7 * 24 * 60 * 60 * 1000  // 7 days
   }
