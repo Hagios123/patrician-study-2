@@ -45,7 +45,7 @@ Patrician Study is a complete learning management system built with Node.js, Exp
 | Node.js + Express | Backend web server |
 | MySQL | Database (hosted on Railway) |
 | HTML + CSS + JavaScript | Frontend (single file) |
-| Claude API (Anthropic) | AI features |
+| Grok API (Anthropic) | AI features |
 | Railway.app | Hosting + database |
 | GitHub | Version control + auto-deploy |
 
