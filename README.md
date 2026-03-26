@@ -9,7 +9,7 @@ Patrician Study is a complete learning management system built with Node.js, Exp
 
 ## 🌐 Live Demo
 
-**[https://web-production-1135fc.up.railway.app](https://web-production-1135fc.up.railway.app)**
+**[patricianstudy.up.railway.app](patricianstudy.up.railway.app)**
 
 | Role | Email | Password |
 |------|-------|----------|
