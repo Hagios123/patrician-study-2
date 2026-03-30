@@ -82,6 +82,7 @@ app.use(session({
   cookie: {
     secure:   false,
     httpOnly: true,
+    sameSite: 'lax',
     maxAge:   7 * 24 * 60 * 60 * 1000  // 7 days
   }
 }));
@@ -510,6 +511,15 @@ app.post('/api/assignments/:id/grade/:studentId', auth, async (req, res) => {
 app.get('/api/messages/group/:groupId', auth, async (req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM messages WHERE group_id = ? AND type = "group" ORDER BY ts ASC', [req.params.groupId]);
+    res.json({ ok: true, messages: rows });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+
+app.get('/api/messages/dm/all', auth, async (req, res) => {
+  if (req.session.userRole !== 'admin') return res.json({ ok: false, error: 'Admin only' });
+  try {
+    const [rows] = await db.execute('SELECT m.*,u1.name as from_name,u2.name as to_name FROM messages m LEFT JOIN users u1 ON m.from_id=u1.id LEFT JOIN users u2 ON m.to_id=u2.id WHERE m.type="dm" ORDER BY m.ts DESC LIMIT 200');
     res.json({ ok: true, messages: rows });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
